@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT 长对话统一工具箱（性能·导航·提示词·导出·排版）
 // @namespace    local.codex.chatgpt.unified
-// @version      1.0.3
+// @version      1.0.4
 // @description  合并长对话性能优化、可恢复 DOM 卸载、双层/自适应大纲、提示词库、Markdown/JSON/TXT 会话导出、字体与滚动修复；目录跳转与生成期防自动沉底协同工作。
 // @author       Codex；含 Alex S Hamilton 的 ChatGPT Lazy Chat++（GPL-3.0-or-later）
 // @homepageURL  https://github.com/zjc1772665101-source/chatgpt-unified-long-chat-toolkit
@@ -33,7 +33,7 @@
   const PROMPT_STORAGE_KEY = 'cgpt-unified-prompt-library-v1';
   const runtime = globalThis[RUNTIME_KEY] || (globalThis[RUNTIME_KEY] = {});
 
-  runtime.version = '1.0.3';
+  runtime.version = '1.0.4';
   runtime.lazy = runtime.lazy || null;
   runtime.navigationLeaseTimer = 0;
   runtime.beginNavigationLease = (duration = 3200) => {
@@ -263,6 +263,20 @@
     } catch {}
   }
 
+  // Tabler Icons (MIT): https://github.com/tabler/tabler-icons
+  const PROMPT_ACTION_ICONS = Object.freeze({
+    pin: [
+      'M15 4.5l-4 4l-4 1.5l-1.5 1.5l7 7l1.5 -1.5l1.5 -4l4 -4',
+      'M9 15l-4.5 4.5',
+      'M14.5 4l5.5 5.5',
+    ],
+    edit: [
+      'M7 7h-1a2 2 0 0 0 -2 2v9a2 2 0 0 0 2 2h9a2 2 0 0 0 2 -2v-1',
+      'M20.385 6.585a2.1 2.1 0 0 0 -2.97 -2.97l-8.415 8.385v3h3l8.385 -8.415',
+      'M16 5l3 3',
+    ],
+  });
+
   class PromptLibrary {
     constructor() {
       this.prompts = this.normalizeLibrary(storageRead(PROMPT_STORAGE_KEY, []));
@@ -274,21 +288,26 @@
       this.editor = null;
       this.editingId = null;
       this.onCountChange = null;
+      this.draggedPromptId = null;
+      this.suppressPromptClickUntil = 0;
     }
 
     normalizeLibrary(value) {
       if (!Array.isArray(value)) return [];
-      return value.map((item, index) => ({
+      const normalized = value.map((item, index) => ({
         id: String(item?.id || `prompt-${Date.now()}-${index}`),
         title: normalizeText(item?.title || `提示词 ${index + 1}`).slice(0, 120),
         category: normalizeText(item?.category || '未分类').slice(0, 48),
         content: String(item?.content || ''),
         pinned: Boolean(item?.pinned),
+        order: Number.isFinite(Number(item?.order)) ? Number(item.order) : index,
         useCount: Math.max(0, Number(item?.useCount) || 0),
         createdAt: item?.createdAt || new Date().toISOString(),
         updatedAt: item?.updatedAt || new Date().toISOString(),
         lastUsedAt: item?.lastUsedAt || null,
       })).filter((item) => item.content.trim());
+      normalized.sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt));
+      return this.reindexPromptOrder(normalized);
     }
 
     get count() {
@@ -329,13 +348,23 @@
         .session-export-toolbar { align-items: center; color: var(--text-tertiary, #777); font-size: 11px; }
         .session-export-toolbar .prompt-mini-btn { min-height: 25px; padding: 3px 6px; font-size: 11px; }
         .prompt-list { min-height: 0; flex: 1; overflow-y: auto; padding: 6px; scrollbar-width: thin; }
-        .prompt-card { position: relative; margin-bottom: 5px; padding: 8px; border: 1px solid transparent; border-radius: 9px; background: color-mix(in srgb, var(--main-surface-secondary, #eee) 58%, transparent); }
+        .prompt-card { position: relative; margin-bottom: 5px; padding: 8px; border: 1px solid transparent; border-radius: 9px; background: color-mix(in srgb, var(--main-surface-secondary, #eee) 58%, transparent); cursor: grab; transition: border-color 120ms ease, opacity 120ms ease, transform 120ms ease; }
         .prompt-card[data-pinned="true"] { border-color: color-mix(in srgb, #d99b18 45%, transparent); }
-        .prompt-card-main { width: 100%; padding: 0 0 5px; border: 0; background: transparent; color: inherit; text-align: start; cursor: pointer; }
-        .prompt-card-title { display: flex; gap: 6px; align-items: center; font-weight: 600; }
-        .prompt-card-category { padding: 1px 5px; border-radius: 99px; background: color-mix(in srgb, currentColor 9%, transparent); color: var(--text-tertiary, #777); font-size: 10px; font-weight: 400; }
+        .prompt-card.dragging { opacity: .42; cursor: grabbing; }
+        .prompt-card.drop-before::before, .prompt-card.drop-after::after { position: absolute; right: 5px; left: 5px; z-index: 2; height: 2px; border-radius: 99px; background: #6d5dfc; content: ''; pointer-events: none; }
+        .prompt-card.drop-before::before { top: -4px; }
+        .prompt-card.drop-after::after { bottom: -4px; }
+        .prompt-card-main { width: 100%; min-width: 0; padding: 0 64px 5px 0; border: 0; background: transparent; color: inherit; text-align: start; cursor: pointer; }
+        .prompt-card-title { display: flex; min-width: 0; gap: 6px; align-items: center; font-weight: 600; }
+        .prompt-card-title-text { display: block; min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .prompt-card-category { flex: none; max-width: 42%; padding: 1px 5px; overflow: hidden; border-radius: 99px; background: color-mix(in srgb, currentColor 9%, transparent); color: var(--text-tertiary, #777); font-size: 10px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
         .prompt-card-preview { display: -webkit-box; margin-top: 4px; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; color: var(--text-secondary, #555); font-size: 11.5px; white-space: pre-wrap; }
-        .prompt-card-actions { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
+        .prompt-card-actions { position: absolute; top: 6px; right: 6px; display: flex; gap: 2px; opacity: 0; visibility: hidden; pointer-events: none; transform: translateY(-2px); transition: opacity 120ms ease, transform 120ms ease, visibility 120ms; }
+        .prompt-card:hover .prompt-card-actions, .prompt-card:focus-within .prompt-card-actions { opacity: 1; visibility: visible; pointer-events: auto; transform: translateY(0); }
+        .prompt-action-btn { display: grid; width: 28px; height: 28px; padding: 0; place-items: center; border: 0; border-radius: 7px; background: color-mix(in srgb, var(--main-surface-primary, #fff) 72%, transparent); color: var(--text-secondary, #666); cursor: pointer; }
+        .prompt-action-btn:hover, .prompt-action-btn:focus-visible { background: var(--main-surface-primary, var(--bg-primary, #fff)); color: var(--text-primary, #161616); outline: none; }
+        .prompt-action-btn.active { background: #6d5dfc; color: #fff; }
+        .prompt-action-icon { display: block; width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
         .prompt-empty { padding: 24px 12px; color: var(--text-tertiary, #777); text-align: center; font-size: 12px; }
         .toc-item[data-unloaded="true"] { color: var(--text-tertiary, #777); font-style: italic; }
         .prompt-editor { width: min(520px, calc(100vw - 32px)); max-height: calc(100vh - 32px); padding: 0; overflow: hidden; border: 1px solid var(--border-light, rgba(0,0,0,.18)); border-radius: 12px; background: var(--main-surface-primary, var(--bg-primary, #fff)); color: var(--text-primary, #161616); pointer-events: auto !important; }
@@ -346,6 +375,12 @@
         .prompt-editor input, .prompt-editor textarea { padding: 7px 9px; }
         .prompt-editor textarea { min-height: 140px; max-height: 46vh; resize: vertical; }
         .prompt-editor-actions { display: flex; gap: 7px; justify-content: flex-end; }
+        @media (hover: none), (pointer: coarse) {
+          .prompt-card-actions { opacity: 1; visibility: visible; pointer-events: auto; transform: none; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .prompt-card, .prompt-card-actions { transition: none; }
+        }
       `;
       this.shadow.appendChild(style);
     }
@@ -357,6 +392,31 @@
       button.textContent = label;
       button.title = title || label;
       button.addEventListener('click', handler);
+      return button;
+    }
+
+    makeIconButton(iconName, title, handler) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'prompt-action-btn';
+      button.title = title;
+      button.setAttribute('aria-label', title);
+      button.draggable = false;
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.classList.add('prompt-action-icon');
+      svg.setAttribute('viewBox', '0 0 24 24');
+      svg.setAttribute('aria-hidden', 'true');
+      for (const pathData of PROMPT_ACTION_ICONS[iconName] || []) {
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', pathData);
+        svg.appendChild(path);
+      }
+      button.appendChild(svg);
+      button.addEventListener('dragstart', (event) => event.preventDefault());
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        handler(event);
+      });
       return button;
     }
 
@@ -474,9 +534,86 @@
         if (category && item.category !== category) return false;
         if (!query) return true;
         return `${item.title}\n${item.category}\n${item.content}`.toLocaleLowerCase().includes(query);
-      }).sort((a, b) => Number(b.pinned) - Number(a.pinned)
-        || String(b.lastUsedAt || '').localeCompare(String(a.lastUsedAt || ''))
-        || a.title.localeCompare(b.title, 'zh-CN'));
+      }).sort((a, b) => a.order - b.order || a.title.localeCompare(b.title, 'zh-CN'));
+    }
+
+    orderedPrompts() {
+      return [...this.prompts].sort((a, b) => a.order - b.order || a.title.localeCompare(b.title, 'zh-CN'));
+    }
+
+    reindexPromptOrder(items = this.prompts) {
+      items.forEach((item, index) => {
+        item.order = index;
+      });
+      return items;
+    }
+
+    movePrompt(draggedId, targetId, placeAfter = false) {
+      if (!draggedId || !targetId || draggedId === targetId) return false;
+      const ordered = this.orderedPrompts();
+      const fromIndex = ordered.findIndex((item) => item.id === draggedId);
+      if (fromIndex < 0) return false;
+      const [dragged] = ordered.splice(fromIndex, 1);
+      const targetIndex = ordered.findIndex((item) => item.id === targetId);
+      if (targetIndex < 0) return false;
+      ordered.splice(targetIndex + (placeAfter ? 1 : 0), 0, dragged);
+      this.prompts = this.reindexPromptOrder(ordered);
+      this.persist();
+      this.render();
+      return true;
+    }
+
+    clearPromptDropIndicators() {
+      this.list?.querySelectorAll('.drop-before, .drop-after').forEach((card) => {
+        card.classList.remove('drop-before', 'drop-after');
+      });
+    }
+
+    finishPromptDrag() {
+      this.list?.querySelectorAll('.prompt-card.dragging').forEach((card) => {
+        card.classList.remove('dragging');
+        card.setAttribute('aria-grabbed', 'false');
+      });
+      this.clearPromptDropIndicators();
+      this.draggedPromptId = null;
+      this.suppressPromptClickUntil = Date.now() + 250;
+    }
+
+    handlePromptDragStart(event, item, card) {
+      const target = event.target;
+      if (target instanceof Element && target.closest('.prompt-action-btn')) {
+        event.preventDefault();
+        return;
+      }
+      this.draggedPromptId = item.id;
+      card.classList.add('dragging');
+      card.setAttribute('aria-grabbed', 'true');
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/plain', item.id);
+      }
+    }
+
+    handlePromptDragOver(event, item, card) {
+      if (!this.draggedPromptId || this.draggedPromptId === item.id) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+      this.clearPromptDropIndicators();
+      const rect = card.getBoundingClientRect();
+      card.classList.add(event.clientY < rect.top + rect.height / 2 ? 'drop-before' : 'drop-after');
+    }
+
+    handlePromptDrop(event, item, card) {
+      event.preventDefault();
+      const draggedId = this.draggedPromptId;
+      if (!draggedId || draggedId === item.id) {
+        this.finishPromptDrag();
+        return;
+      }
+      const rect = card.getBoundingClientRect();
+      const placeAfter = event.clientY >= rect.top + rect.height / 2;
+      this.finishPromptDrag();
+      this.movePrompt(draggedId, item.id, placeAfter);
     }
 
     render() {
@@ -498,14 +635,19 @@
       const card = document.createElement('article');
       card.className = 'prompt-card';
       card.dataset.pinned = String(item.pinned);
+      card.dataset.promptId = item.id;
+      card.draggable = true;
+      card.setAttribute('aria-grabbed', 'false');
       const main = document.createElement('button');
       main.type = 'button';
       main.className = 'prompt-card-main';
-      main.title = '插入到 ChatGPT 输入框（不会自动发送）';
+      main.title = `${item.title}\n点击插入；按住拖动可调整顺序`;
       const title = document.createElement('div');
       title.className = 'prompt-card-title';
       const titleText = document.createElement('span');
+      titleText.className = 'prompt-card-title-text';
       titleText.textContent = `${item.pinned ? '★ ' : ''}${item.title}`;
+      titleText.title = item.title;
       const category = document.createElement('span');
       category.className = 'prompt-card-category';
       category.textContent = item.category;
@@ -514,15 +656,28 @@
       preview.className = 'prompt-card-preview';
       preview.textContent = item.content;
       main.append(title, preview);
-      main.addEventListener('click', () => this.usePrompt(item));
+      main.addEventListener('click', (event) => {
+        if (Date.now() < this.suppressPromptClickUntil) {
+          event.preventDefault();
+          return;
+        }
+        this.usePrompt(item);
+      });
 
       const actions = document.createElement('div');
       actions.className = 'prompt-card-actions';
-      actions.append(
-        this.makeButton(item.pinned ? '取消置顶' : '置顶', '', () => this.togglePin(item.id)),
-        this.makeButton('编辑', '', () => this.openEditor(item)),
-      );
+      const pin = this.makeIconButton('pin', item.pinned ? '取消置顶' : '置顶', () => this.togglePin(item.id));
+      pin.classList.toggle('active', item.pinned);
+      pin.setAttribute('aria-pressed', String(item.pinned));
+      actions.append(pin, this.makeIconButton('edit', '编辑', () => this.openEditor(item)));
       card.append(main, actions);
+      card.addEventListener('dragstart', (event) => this.handlePromptDragStart(event, item, card));
+      card.addEventListener('dragover', (event) => this.handlePromptDragOver(event, item, card));
+      card.addEventListener('dragleave', (event) => {
+        if (!card.contains(event.relatedTarget)) card.classList.remove('drop-before', 'drop-after');
+      });
+      card.addEventListener('drop', (event) => this.handlePromptDrop(event, item, card));
+      card.addEventListener('dragend', () => this.finishPromptDrag());
       return card;
     }
 
@@ -553,6 +708,7 @@
         id: `prompt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         ...normalized,
         pinned: false,
+        order: this.prompts.length,
         useCount: 0,
         createdAt: now,
         lastUsedAt: null,
@@ -566,6 +722,10 @@
       if (!item) return;
       item.pinned = !item.pinned;
       item.updatedAt = new Date().toISOString();
+      if (item.pinned) {
+        const ordered = this.orderedPrompts().filter((prompt) => prompt.id !== id);
+        this.prompts = this.reindexPromptOrder([item, ...ordered]);
+      }
       this.persist();
       this.render();
     }
@@ -574,6 +734,7 @@
       const item = this.prompts.find((prompt) => prompt.id === id);
       if (!item || !window.confirm(`删除提示词“${item.title}”？`)) return false;
       this.prompts = this.prompts.filter((prompt) => prompt.id !== id);
+      this.reindexPromptOrder(this.prompts);
       this.persist();
       this.render();
       return true;
@@ -758,9 +919,16 @@
             const merged = new Map(this.prompts.map((item) => [item.id, item]));
             for (const item of imported) {
               const sameTitle = [...merged.values()].find((current) => current.title === item.title);
-              merged.set(sameTitle?.id || item.id, { ...(sameTitle || {}), ...item, id: sameTitle?.id || item.id });
+              const existing = merged.get(item.id) || sameTitle || null;
+              const id = existing?.id || item.id;
+              merged.set(id, {
+                ...(existing || {}),
+                ...item,
+                id,
+                order: existing?.order ?? merged.size,
+              });
             }
-            this.prompts = [...merged.values()];
+            this.prompts = this.reindexPromptOrder([...merged.values()].sort((a, b) => a.order - b.order));
           }
           this.persist();
           this.render();
