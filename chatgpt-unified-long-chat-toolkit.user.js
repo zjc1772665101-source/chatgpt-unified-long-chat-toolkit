@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT 长对话统一工具箱（性能·导航·提示词·导出·排版）
 // @namespace    local.codex.chatgpt.unified
-// @version      1.0.4
+// @version      1.0.5
 // @description  合并长对话性能优化、可恢复 DOM 卸载、双层/自适应大纲、提示词库、Markdown/JSON/TXT 会话导出、字体与滚动修复；目录跳转与生成期防自动沉底协同工作。
 // @author       Codex；含 Alex S Hamilton 的 ChatGPT Lazy Chat++（GPL-3.0-or-later）
 // @homepageURL  https://github.com/zjc1772665101-source/chatgpt-unified-long-chat-toolkit
@@ -33,7 +33,7 @@
   const PROMPT_STORAGE_KEY = 'cgpt-unified-prompt-library-v1';
   const runtime = globalThis[RUNTIME_KEY] || (globalThis[RUNTIME_KEY] = {});
 
-  runtime.version = '1.0.4';
+  runtime.version = '1.0.5';
   runtime.lazy = runtime.lazy || null;
   runtime.navigationLeaseTimer = 0;
   runtime.beginNavigationLease = (duration = 3200) => {
@@ -959,13 +959,12 @@
     // 隐藏选中文字后出现的“询问 ChatGPT / 开始写作”浮层。
     hideSelectionActions: true,
 
-    // 启用当前 Assistant 回答的 H1/H2 目录。
+    // 启用当前 Assistant 回答内部的自适应章节目录。
     enableAnswerToc: true,
 
-    // 可改成 'h1, h2, h3'，但标题过多时目录会更拥挤。
-    answerTocHeadingSelector: 'h1, h2',
+    // “章节”只描述当前回答内部结构；完整读取 H1-H6，再按需补充回答内的派生小节。
+    answerTocHeadingSelector: 'h1, h2, h3, h4, h5, h6',
 
-    // 没有 H1/H2 时，依次使用 H3-H6、加粗段首和结构化段落生成降级大纲。
     answerTocDerivedOutline: true,
     answerTocDerivedMaxItems: 18,
     answerTocDerivedMinTextLength: 8,
@@ -3470,11 +3469,18 @@
         });
       }
 
-      if (!headings.length && this.config.answerTocDerivedOutline) {
-        headings.push(...this.collectDerivedOutline());
+      if (this.config.answerTocDerivedOutline) {
+        headings.push(...this.collectAdaptiveOutline(headings));
       }
+      headings.sort((a, b) => {
+        if (a.element === b.element) return 0;
+        const position = a.element.compareDocumentPosition(b.element);
+        if (position & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+        if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+        return 0;
+      });
 
-      this.headings = headings;
+      this.headings = headings.slice(0, Math.max(3, Number(this.config.answerTocDerivedMaxItems) || 18));
       this.observeHeadingText();
       this.renderTocItems();
       const nextActiveIndex = this.findActiveIndexBinary();
@@ -3548,6 +3554,120 @@
           const prefix = element.tagName === 'PRE' ? '代码：' : element.tagName === 'TABLE' ? '表格：' : '';
           return makeItem(element, 3, prefix);
         }).filter(Boolean);
+    }
+
+    collectAdaptiveOutline(existing = []) {
+      const answer = this.currentAnswer;
+      if (!(answer instanceof HTMLElement)) return [];
+      const markdownRoot = answer.matches('.markdown') ? answer : answer.querySelector('.markdown');
+      const root = markdownRoot || answer;
+      const minLength = Math.max(3, Number(this.config.answerTocDerivedMinTextLength) || 8);
+      const maxItems = Math.max(3, Number(this.config.answerTocDerivedMaxItems) || 18);
+      const totalTextLength = this.normalizeText(root.textContent ?? '').length;
+      const separatorTarget = Math.min(6, root.querySelectorAll('hr').length + 1);
+      const targetCount = Math.min(maxItems, Math.max(
+        existing.length,
+        separatorTarget,
+        totalTextLength >= 1400 ? 4 : totalTextLength >= 600 ? 3 : totalTextLength >= 240 ? 2 : 1,
+      ));
+      const needed = Math.max(0, targetCount - existing.length);
+      if (!needed) return [];
+
+      const existingElements = new Set(existing.map((item) => item.element));
+      const existingLabels = new Set(existing.map((item) => this.normalizeText(item.fullLabel ?? '').toLocaleLowerCase()));
+      const belongsToAnswer = (element) =>
+        element.closest('[data-message-author-role="assistant"]') === answer
+        && !element.closest('[hidden], [aria-hidden="true"]');
+      const compareElements = (a, b) => {
+        if (a === b) return 0;
+        const position = a.compareDocumentPosition(b);
+        if (position & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+        if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+        return 0;
+      };
+      const makeItem = (element, labelOverride = '', level = 3) => {
+        if (!(element instanceof HTMLElement) || existingElements.has(element) || !belongsToAnswer(element)) return null;
+        const raw = this.normalizeText(element.textContent ?? '');
+        const source = this.normalizeText(labelOverride || raw)
+          .replace(/\*\*([^*]+)\*\*/g, '$1');
+        if (raw.length < minLength || source.length < 2) return null;
+        const sentence = source.split(/[。！？.!?](?:\s+|$)|\n+/)[0] || source;
+        const prefix = element.tagName === 'PRE' ? '代码：' : element.tagName === 'TABLE' ? '表格：' : '';
+        const fullLabel = (prefix + sentence).slice(0, 220);
+        if (existingLabels.has(this.normalizeText(fullLabel).toLocaleLowerCase())) return null;
+        return {
+          element,
+          level,
+          fullLabel,
+          label: this.truncateLabel(fullLabel, this.config.answerTocMaxLabelLength, 180),
+          derived: true,
+        };
+      };
+      const extractLeadingLabel = (element) => {
+        const raw = this.normalizeText(element.textContent ?? '');
+        const markdownBold = raw.match(/^\*\*([^*\n]{2,100})\*\*[:：]?/);
+        if (markdownBold) return this.normalizeText(markdownBold[1]);
+        const strong = element.querySelector(':scope > strong:first-child, :scope > b:first-child');
+        if (!(strong instanceof HTMLElement)) return '';
+        let textBefore = '';
+        for (const node of element.childNodes) {
+          if (node === strong) break;
+          textBefore += node.textContent ?? '';
+        }
+        if (this.normalizeText(textBefore)) return '';
+        const label = this.normalizeText(strong.textContent ?? '');
+        return label.length >= 2 && label.length <= 100 ? label : '';
+      };
+
+      const blockSelector = 'p, blockquote, pre, ul, ol, table';
+      const blocks = Array.from(root.querySelectorAll(blockSelector))
+        .filter((element) => element instanceof HTMLElement && belongsToAnswer(element))
+        .filter((element) => {
+          const ancestorBlock = element.parentElement?.closest(blockSelector);
+          return !(ancestorBlock instanceof HTMLElement) || !root.contains(ancestorBlock);
+        })
+        .filter((element) => this.normalizeText(element.textContent ?? '').length >= minLength)
+        .sort(compareElements);
+      if (!blocks.length) return existing.length ? [] : this.collectDerivedOutline();
+
+      const candidates = new Map();
+      const offer = (element, labelOverride, level, priority) => {
+        const item = makeItem(element, labelOverride, level);
+        if (!item) return;
+        const current = candidates.get(element);
+        if (!current || priority < current.priority) candidates.set(element, { item, priority });
+      };
+
+      const firstExisting = existing.map((item) => item.element).filter(Boolean).sort(compareElements)[0] || null;
+      const leadingBlock = blocks.find((block) => !firstExisting
+        || Boolean(block.compareDocumentPosition(firstExisting) & Node.DOCUMENT_POSITION_FOLLOWING));
+      if (leadingBlock) offer(leadingBlock, '', 2, 0);
+
+      for (const element of root.querySelectorAll('p, li')) {
+        if (!(element instanceof HTMLElement) || !belongsToAnswer(element)) continue;
+        const leadingLabel = extractLeadingLabel(element);
+        if (leadingLabel) offer(element, leadingLabel, element.tagName === 'LI' ? 4 : 3, 1);
+      }
+
+      const boundaryNodes = Array.from(root.querySelectorAll('hr, h1, h2, h3, h4, h5, h6, p, blockquote, pre, ul, ol, table'))
+        .filter((element) => element instanceof HTMLElement && belongsToAnswer(element));
+      for (let index = 0; index < boundaryNodes.length; index += 1) {
+        if (boundaryNodes[index].tagName !== 'HR') continue;
+        const next = boundaryNodes.slice(index + 1).find((element) => element.tagName !== 'HR');
+        if (!next || /^H[1-6]$/.test(next.tagName) || existingElements.has(next)) continue;
+        offer(next, '', 3, 2);
+      }
+
+      const stride = Math.max(1, Math.floor(blocks.length / Math.max(1, needed)));
+      blocks.forEach((element, index) => {
+        if (index === 0 || index % stride === 0 || index === blocks.length - 1) offer(element, '', 3, 3);
+      });
+
+      return [...candidates.values()]
+        .sort((a, b) => a.priority - b.priority || compareElements(a.item.element, b.item.element))
+        .slice(0, needed)
+        .map((entry) => entry.item)
+        .sort((a, b) => compareElements(a.element, b.element));
     }
 
     observeHeadingText() {
