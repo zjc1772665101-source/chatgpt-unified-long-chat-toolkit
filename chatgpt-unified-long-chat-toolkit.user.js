@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT 长对话统一工具箱（性能·导航·提示词·导出·排版）
 // @namespace    local.codex.chatgpt.unified
-// @version      1.0.5
+// @version      1.0.8
 // @description  合并长对话性能优化、可恢复 DOM 卸载、双层/自适应大纲、提示词库、Markdown/JSON/TXT 会话导出、字体与滚动修复；目录跳转与生成期防自动沉底协同工作。
 // @author       Codex；含 Alex S Hamilton 的 ChatGPT Lazy Chat++（GPL-3.0-or-later）
 // @homepageURL  https://github.com/zjc1772665101-source/chatgpt-unified-long-chat-toolkit
@@ -33,7 +33,7 @@
   const PROMPT_STORAGE_KEY = 'cgpt-unified-prompt-library-v1';
   const runtime = globalThis[RUNTIME_KEY] || (globalThis[RUNTIME_KEY] = {});
 
-  runtime.version = '1.0.5';
+  runtime.version = '1.0.8';
   runtime.lazy = runtime.lazy || null;
   runtime.navigationLeaseTimer = 0;
   runtime.beginNavigationLease = (duration = 3200) => {
@@ -969,6 +969,12 @@
     answerTocDerivedMaxItems: 18,
     answerTocDerivedMinTextLength: 8,
 
+    // 首屏只挂载少量轮次时，分批借用原生目录补全真实提问标题。
+    conversationTocAutoHydrateLabels: true,
+    conversationTocHydrateBatchSize: 3,
+    conversationTocHydrateDelayMs: 360,
+    conversationTocHydrateTimeoutMs: 900,
+
     // 第一次使用时是否默认收起；之后会记住手动选择。
     answerTocInitiallyCollapsed: false,
     answerTocRememberCollapsedState: true,
@@ -1110,7 +1116,7 @@
   if (CONFIG.enableAnswerToc) {
     css.push(`
       /* 让目录跳转后的标题与页面顶部保留适当间距。 */
-      ${ASSISTANT_SELECTOR} :is(h1, h2, h3, h4) {
+      ${ASSISTANT_SELECTOR} :is(h1, h2, h3, h4, h5, h6) {
         scroll-margin-block-start: 88px;
       }
 
@@ -1219,6 +1225,11 @@
       this.conversationJumpTimers = new Set();
       this.conversationJumpRevealElement = null;
       this.conversationJumpRevealTimer = 0;
+      this.conversationLabelHydrationTimer = 0;
+      this.conversationLabelHydrationToken = 0;
+      this.conversationLabelHydrating = false;
+      this.conversationLabelHydrationContext = null;
+      this.conversationLabelHydrationAttempts = new Map();
 
       this.mainElement = null;
       this.mainObserver = null;
@@ -1235,6 +1246,8 @@
       this.rebindTimer = 0;
       this.healthTimer = 0;
       this.lastUrl = location.href;
+      this.lastConversationRouteKey = this.getConversationRouteKey(this.lastUrl);
+      this.restoreConversationLabelSnapshot();
 
       this.hoverExpandTimer = 0;
       this.hoverCollapseTimer = 0;
@@ -1740,6 +1753,12 @@
             font-size: 12px;
           }
 
+          .toc-item[data-level="5"],
+          .toc-item[data-level="6"] {
+            padding-inline-start: 50px;
+            font-size: 11.5px;
+          }
+
           .prompt-index {
             width: 2.4em;
             flex: none;
@@ -2238,6 +2257,8 @@
       if (persist) this.writeViewState();
       this.applyActiveView();
       this.updateViewMeta();
+      if (this.activeView === 'conversation') this.scheduleConversationLabelHydration();
+      else this.cancelConversationLabelHydration();
 
       window.requestAnimationFrame(() => {
         if (this.activeView === 'conversation') {
@@ -2438,6 +2459,9 @@
     }
 
     onDocumentPointerDown(event) {
+      if (event.isTrusted && this.conversationLabelHydrating) {
+        this.cancelConversationLabelHydration();
+      }
       if (!this.transientHoverOpen || this.collapsed) return;
       if (
         event instanceof PointerEvent &&
@@ -2591,6 +2615,7 @@
 
       this.cancelHoverExpand();
       this.cancelHoverCollapse();
+      if (nextCollapsed) this.cancelConversationLabelHydration();
 
       if (!nextCollapsed && source === 'hover') {
         this.transientHoverOpen = true;
@@ -3158,14 +3183,36 @@
       window.setTimeout(() => this.requestFrame(true), 180);
     }
 
+    getConversationRouteKey(value = location.href) {
+      try {
+        const url = new URL(value, location.origin);
+        return `${url.origin}${url.pathname}`;
+      } catch {
+        return String(value || '').split(/[?#]/, 1)[0];
+      }
+    }
+
     resetForNavigation() {
-      this.lastUrl = location.href;
+      const nextUrl = location.href;
+      const nextRouteKey = this.getConversationRouteKey(nextUrl);
+      const routeChanged = nextRouteKey !== this.lastConversationRouteKey;
+      this.lastUrl = nextUrl;
+      this.lastConversationRouteKey = nextRouteKey;
       this.cancelConversationJump();
-      this.clearConversationLabelCacheState();
-      this.maxObservedOfficialLogicalIndex = -1;
+      this.cancelConversationLabelHydration(!routeChanged);
+
+      if (routeChanged) {
+        this.clearConversationLabelCacheState();
+        this.maxObservedOfficialLogicalIndex = -1;
+        this.restoreConversationLabelSnapshot();
+        this.clearConversationToc();
+      } else {
+        // React 仅替换 main 或 URL 查询参数变化时保留完整问答目录快照。
+        this.lastConversationSignature = '';
+      }
+
       this.disconnectCurrentAnswer();
       this.clearToc();
-      this.clearConversationToc();
       this.bindMainObserver();
       this.syncOfficialConversationNav();
       this.scheduleConversationRebuild(80);
@@ -3480,7 +3527,8 @@
         return 0;
       });
 
-      this.headings = headings.slice(0, Math.max(3, Number(this.config.answerTocDerivedMaxItems) || 18));
+      // 正式 H1-H6 一律完整保留；answerTocDerivedMaxItems 只限制自动派生项。
+      this.headings = headings;
       this.observeHeadingText();
       this.renderTocItems();
       const nextActiveIndex = this.findActiveIndexBinary();
@@ -4012,10 +4060,45 @@
       return true;
     }
 
+    getConversationLabelSnapshotKey() {
+      const routeKey = this.lastConversationRouteKey || this.getConversationRouteKey();
+      return 'cgpt-unified-conversation-labels-v1:' + encodeURIComponent(routeKey);
+    }
+
+    restoreConversationLabelSnapshot() {
+      try {
+        const parsed = JSON.parse(sessionStorage.getItem(this.getConversationLabelSnapshotKey()) || '[]');
+        if (!Array.isArray(parsed)) return;
+        for (const entry of parsed.slice(0, 500)) {
+          const logicalIndex = Number(entry?.[0]);
+          const label = this.normalizeConversationText(entry?.[1] || '').slice(0, 1000);
+          if (Number.isInteger(logicalIndex) && logicalIndex >= 0 && label) {
+            this.conversationLabelCache.set(logicalIndex, label);
+          }
+        }
+      } catch (_) {
+        // sessionStorage 不可用或旧快照损坏时直接重新采集。
+      }
+    }
+
+    persistConversationLabelSnapshot() {
+      try {
+        const entries = [...this.conversationLabelCache.entries()]
+          .filter(([logicalIndex, label]) =>
+            Number.isInteger(logicalIndex) && logicalIndex >= 0
+            && !this.isConversationPlaceholderLabel(label, logicalIndex))
+          .slice(0, 500);
+        sessionStorage.setItem(this.getConversationLabelSnapshotKey(), JSON.stringify(entries));
+      } catch (_) {
+        // 标签只在当前标签页保存；存储不可用不影响目录跳转。
+      }
+    }
+
     clearConversationLabelCacheState() {
       this.conversationLabelCache.clear();
       this.conversationCacheIdentityByIndex.clear();
       this.conversationCacheIndexByIdentity.clear();
+      this.conversationLabelHydrationAttempts?.clear();
     }
 
     removeConversationCachedLabel(logicalIndex) {
@@ -4060,6 +4143,148 @@
       }
 
       this.conversationLabelCache.set(logicalIndex, record.fullLabel);
+    }
+
+    isConversationPlaceholderLabel(label, logicalIndex = -1) {
+      const normalized = this.normalizeConversationText(label || '');
+      if (!normalized) return true;
+      if (/^Prompt\s+\d+$/i.test(normalized)) return true;
+      if (/^提问\s+\d+(?:（尚未加载，点击加载）)?$/.test(normalized)) return true;
+      return logicalIndex >= 0 && normalized === 'Prompt ' + (logicalIndex + 1);
+    }
+
+    findDirectConversationRecord(logicalIndex) {
+      const records = this.collectUserMessageRecords();
+      return records.find((record) =>
+        Number.isInteger(record.turnNumber)
+        && Math.floor(record.turnNumber / 2) === logicalIndex
+        && !this.isConversationPlaceholderLabel(record.fullLabel, logicalIndex)) || null;
+    }
+
+    waitForDirectConversationRecord(logicalIndex, token) {
+      const routeKey = this.lastConversationRouteKey;
+      const startedAt = performance.now();
+      const timeout = Math.max(250, Number(this.config.conversationTocHydrateTimeoutMs) || 900);
+      return new Promise((resolve) => {
+        const inspect = () => {
+          if (token !== this.conversationLabelHydrationToken || routeKey !== this.lastConversationRouteKey) {
+            resolve(null);
+            return;
+          }
+          const record = this.findDirectConversationRecord(logicalIndex);
+          if (record || performance.now() - startedAt >= timeout) {
+            resolve(record);
+            return;
+          }
+          window.setTimeout(inspect, 60);
+        };
+        inspect();
+      });
+    }
+
+    restoreConversationLabelHydrationContext() {
+      const context = this.conversationLabelHydrationContext;
+      this.conversationLabelHydrationContext = null;
+      if (!context || context.routeKey !== this.lastConversationRouteKey) return;
+      if (context.activeIndex >= 0 && this.getOfficialActiveLogicalIndex() !== context.activeIndex) {
+        this.activateOfficialConversationButton(context.activeIndex);
+      }
+      window.setTimeout(() => {
+        if (context.routeKey !== this.lastConversationRouteKey) return;
+        if (context.scrollRoot instanceof HTMLElement) context.scrollRoot.scrollTop = context.scrollTop;
+        else window.scrollTo({ top: context.scrollTop, behavior: 'auto' });
+      }, 120);
+    }
+
+    cancelConversationLabelHydration(restore = true) {
+      this.conversationLabelHydrationToken += 1;
+      window.clearTimeout(this.conversationLabelHydrationTimer);
+      this.conversationLabelHydrationTimer = 0;
+      this.conversationLabelHydrating = false;
+      if (restore) this.restoreConversationLabelHydrationContext();
+      else this.conversationLabelHydrationContext = null;
+    }
+
+    scheduleConversationLabelHydration(delay = this.config.conversationTocHydrateDelayMs) {
+      if (
+        !this.config.conversationTocAutoHydrateLabels
+        || this.collapsed
+        || this.activeView !== 'conversation'
+        || document.hidden
+        || this.conversationLabelHydrating
+        || this.dragState
+        || this.resizeState
+      ) return;
+      const hasMissingLabel = this.conversationItems.some((item) =>
+        this.isConversationPlaceholderLabel(item.fullLabel, item.logicalIndex)
+        && (this.conversationLabelHydrationAttempts.get(item.logicalIndex) || 0) < 2);
+      if (!hasMissingLabel) return;
+      window.clearTimeout(this.conversationLabelHydrationTimer);
+      this.conversationLabelHydrationTimer = window.setTimeout(() => {
+        this.conversationLabelHydrationTimer = 0;
+        void this.hydrateConversationLabelBatch();
+      }, Math.max(80, Number(delay) || 360));
+    }
+
+    async hydrateConversationLabelBatch() {
+      if (this.conversationLabelHydrating || this.collapsed || this.activeView !== 'conversation') return;
+      const buttons = this.getOfficialNavButtons();
+      const buttonIndices = new Set(buttons.map((button) =>
+        Number.parseInt(button.dataset.tocItemIndex ?? '', 10)));
+      const batchSize = Math.max(1, Math.min(6, Number(this.config.conversationTocHydrateBatchSize) || 3));
+      const missing = this.conversationItems
+        .filter((item) => buttonIndices.has(item.logicalIndex)
+          && this.isConversationPlaceholderLabel(item.fullLabel, item.logicalIndex)
+          && (this.conversationLabelHydrationAttempts.get(item.logicalIndex) || 0) < 2)
+        .slice(0, batchSize);
+      if (!missing.length) return;
+
+      this.conversationLabelHydrating = true;
+      const token = ++this.conversationLabelHydrationToken;
+      const routeKey = this.lastConversationRouteKey;
+      const originalActiveIndex = this.getOfficialActiveLogicalIndex(buttons);
+      const scrollRoot = this.currentScrollRoot instanceof HTMLElement
+        ? this.currentScrollRoot
+        : document.scrollingElement;
+      const originalScrollTop = scrollRoot?.scrollTop ?? window.scrollY;
+      this.conversationLabelHydrationContext = {
+        routeKey,
+        activeIndex: originalActiveIndex,
+        scrollRoot,
+        scrollTop: originalScrollTop,
+      };
+
+      try {
+        for (const item of missing) {
+          if (token !== this.conversationLabelHydrationToken || routeKey !== this.lastConversationRouteKey) break;
+          const button = this.getOfficialNavButtons().find((candidate) =>
+            Number.parseInt(candidate.dataset.tocItemIndex ?? '', 10) === item.logicalIndex);
+          if (!(button instanceof HTMLButtonElement) || button.disabled) continue;
+          button.click();
+          const record = await this.waitForDirectConversationRecord(item.logicalIndex, token);
+          if (record) {
+            this.cacheConversationRecordLabel(item.logicalIndex, record);
+            this.conversationLabelHydrationAttempts.delete(item.logicalIndex);
+          } else {
+            const attempts = this.conversationLabelHydrationAttempts.get(item.logicalIndex) || 0;
+            this.conversationLabelHydrationAttempts.set(item.logicalIndex, attempts + 1);
+          }
+        }
+      } finally {
+        if (token === this.conversationLabelHydrationToken && routeKey === this.lastConversationRouteKey) {
+          if (originalActiveIndex >= 0 && this.getOfficialActiveLogicalIndex() !== originalActiveIndex) {
+            this.activateOfficialConversationButton(originalActiveIndex);
+            await new Promise((resolve) => window.setTimeout(resolve, 120));
+          }
+          if (scrollRoot instanceof HTMLElement) scrollRoot.scrollTop = originalScrollTop;
+          else window.scrollTo({ top: originalScrollTop, behavior: 'auto' });
+          this.conversationLabelHydrationContext = null;
+          this.persistConversationLabelSnapshot();
+          this.conversationLabelHydrating = false;
+          this.rebuildConversationToc();
+          this.scheduleConversationLabelHydration();
+        }
+      }
     }
 
     mapUserRecordsToLogicalIndices(records, officialButtons) {
@@ -4119,11 +4344,18 @@
       }
 
       if (!officialCount) {
+        let maxCachedIndex = -1;
+        for (const logicalIndex of this.conversationLabelCache.keys()) {
+          if (Number.isInteger(logicalIndex)) maxCachedIndex = Math.max(maxCachedIndex, logicalIndex);
+        }
+        const knownCount = Math.max(this.maxObservedOfficialLogicalIndex, maxCachedIndex) + 1;
+        const domAppearsPartial = knownCount > records.length;
+        const offset = domAppearsPartial ? knownCount - records.length : 0;
         acceptCandidate(
-          records.map((_, index) => index),
-          'dom-only',
-          true,
-          true,
+          records.map((_, index) => index + offset),
+          domAppearsPartial ? 'known-catalog-partial' : 'dom-only',
+          !domAppearsPartial,
+          !domAppearsPartial,
         );
       }
 
@@ -4276,11 +4508,12 @@
 
       /*
        * 首次 hydration 时官方目录可能先出现 1～2 项，随后一次性扩展为
-       * 完整问答数。此前按“小目录”写入的缓存没有可信的绝对索引，必须清空。
+       * 完整问答数。只有缓存尚不完整时才清空早期错位索引；完整快照必须保留。
        */
       if (
         this.maxObservedOfficialLogicalIndex >= 0 &&
-        mapping.officialMaxIndex > this.maxObservedOfficialLogicalIndex + 1
+        mapping.officialMaxIndex > this.maxObservedOfficialLogicalIndex + 1 &&
+        this.conversationLabelCache.size < mapping.officialMaxIndex + 1
       ) {
         this.clearConversationLabelCacheState();
       }
@@ -4313,7 +4546,12 @@
         ...this.conversationLabelCache.keys(),
       ]);
       const maxKnownIndex = knownIndices.size ? Math.max(...knownIndices) : -1;
-      const maxIndex = Math.max(mapping.maxIndex, maxKnownIndex);
+      // 官方导航或 DOM 暂时缩小时，目录总数不得回退。
+      const maxIndex = Math.max(
+        mapping.maxIndex,
+        maxKnownIndex,
+        this.maxObservedOfficialLogicalIndex,
+      );
 
       for (let logicalIndex = 0; logicalIndex <= maxIndex; logicalIndex += 1) {
         const mappedRecord = mapping.recordsByIndex.get(logicalIndex) ?? null;
@@ -4363,6 +4601,8 @@
       this.applyActiveConversationIndex(active, false);
       this.updateViewMeta();
       this.syncVisibility();
+      this.persistConversationLabelSnapshot();
+      this.scheduleConversationLabelHydration();
     }
 
     renderConversationItems() {
@@ -4652,6 +4892,7 @@
     }
 
     jumpToConversation(index) {
+      this.cancelConversationLabelHydration(false);
       const item = this.conversationItems[index];
       if (!item) return;
 
