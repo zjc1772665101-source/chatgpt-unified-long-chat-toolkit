@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT 长对话统一工具箱（性能·导航·提示词·导出·排版）
 // @namespace    local.codex.chatgpt.unified
-// @version      1.0.8
-// @description  合并长对话性能优化、可恢复 DOM 卸载、双层/自适应大纲、提示词库、Markdown/JSON/TXT 会话导出、字体与滚动修复；目录跳转与生成期防自动沉底协同工作。
+// @version      1.3.1
+// @description  合并长对话性能优化、可恢复 DOM 卸载、API 优先完整会话导出与问答目录、经典紧凑 UI、字体与滚动修复；v1.3.1 修正派生章节层级污染、中文分句与编号去重，并以 scrollend 完成章节精确跳转。
 // @author       Codex；含 Alex S Hamilton 的 ChatGPT Lazy Chat++（GPL-3.0-or-later）
 // @homepageURL  https://github.com/zjc1772665101-source/chatgpt-unified-long-chat-toolkit
 // @supportURL   https://github.com/zjc1772665101-source/chatgpt-unified-long-chat-toolkit/issues
@@ -33,7 +33,7 @@
   const PROMPT_STORAGE_KEY = 'cgpt-unified-prompt-library-v1';
   const runtime = globalThis[RUNTIME_KEY] || (globalThis[RUNTIME_KEY] = {});
 
-  runtime.version = '1.0.8';
+  runtime.version = '1.3.1';
   runtime.lazy = runtime.lazy || null;
   runtime.navigationLeaseTimer = 0;
   runtime.beginNavigationLease = (duration = 3200) => {
@@ -126,13 +126,69 @@
   }
 
   class SessionExporter {
+    constructor() {
+      this.apiFailureLoggedFor = '';
+      // 完整会话树只保存在内存中，不落盘，也不保存 accessToken。
+      // 导出与完整问答目录共用这一份缓存，避免重复请求同一会话。
+      this.apiTreeCache = {
+        conversationId: '',
+        tree: null,
+        fetchedAt: 0,
+        promise: null,
+      };
+      this.apiOutlineCache = {
+        conversationId: '',
+        currentNode: '',
+        items: [],
+      };
+      this.apiTreeDefaultMaxAgeMs = 8000;
+    }
+
+    getConversationId() {
+      const match = location.pathname.match(/\/c\/([0-9a-f-]{20,})/i);
+      return match?.[1] || '';
+    }
+
+    getPageFetch() {
+      try {
+        if (typeof unsafeWindow !== 'undefined' && typeof unsafeWindow.fetch === 'function') {
+          return unsafeWindow.fetch.bind(unsafeWindow);
+        }
+      } catch {}
+      return window.fetch.bind(window);
+    }
+
+    getDomTitle() {
+      return normalizeText(document.title.replace(/\s*[|·-]\s*ChatGPT.*$/i, '')) || 'ChatGPT 会话';
+    }
+
+    normalizeMessageBody(value) {
+      return String(value ?? '')
+        .replace(/\r\n?/g, '\n')
+        .replace(/[ \t]+$/gm, '')
+        .trim();
+    }
+
+    getTurnOrder(turn, fallbackIndex = 0) {
+      const testId = turn?.getAttribute?.('data-testid') || '';
+      const match = /conversation-turn-(\d+)/i.exec(testId);
+      if (match) return Number.parseInt(match[1], 10);
+      const dataTurn = turn?.getAttribute?.('data-turn') || turn?.getAttribute?.('data-turn-id') || '';
+      const numeric = Number.parseInt(dataTurn, 10);
+      return Number.isFinite(numeric) ? numeric : 1_000_000_000 + fallbackIndex;
+    }
+
     getTurnNodes() {
       const bridged = runtime.lazy?.getAllTurnNodes?.();
       const turns = Array.isArray(bridged) && bridged.length
         ? bridged
         : Array.from(document.querySelectorAll('main [data-testid^="conversation-turn-"]'));
       const seen = new Set();
-      return turns.filter((turn) => turn instanceof Element && !seen.has(turn) && seen.add(turn));
+      return turns
+        .filter((turn) => turn instanceof Element && !seen.has(turn) && seen.add(turn))
+        .map((turn, index) => ({ turn, order: this.getTurnOrder(turn, index), index }))
+        .sort((a, b) => a.order - b.order || a.index - b.index)
+        .map((entry) => entry.turn);
     }
 
     extractContent(roleNode) {
@@ -141,7 +197,7 @@
       return markdown || normalizeText(source.textContent);
     }
 
-    collect() {
+    collectDom() {
       const messages = [];
       const seen = new Set();
       for (const turn of this.getTurnNodes()) {
@@ -161,23 +217,332 @@
           messages.push({ index: messages.length, id: messageId, role, content });
         }
       }
-      const title = normalizeText(document.title.replace(/\s*[|·-]\s*ChatGPT.*$/i, '')) || 'ChatGPT 会话';
       return {
         schema: 'cgpt-unified-session-export/v1',
-        title,
+        source: 'dom',
+        title: this.getDomTitle(),
         url: location.href,
         exportedAt: new Date().toISOString(),
         messages,
       };
     }
 
-    toMarkdown(session = this.collect()) {
+    getAttachmentNames(message) {
+      const metadata = message?.metadata || {};
+      const candidates = [
+        ...(Array.isArray(metadata.attachments) ? metadata.attachments : []),
+        ...(Array.isArray(metadata.files) ? metadata.files : []),
+      ];
+      const names = [];
+      const seen = new Set();
+      for (const item of candidates) {
+        const name = String(
+          item?.name || item?.file_name || item?.filename || item?.title || ''
+        ).trim();
+        if (!name || seen.has(name)) continue;
+        seen.add(name);
+        names.push(name);
+      }
+      return names;
+    }
+
+    extractApiPart(part) {
+      if (typeof part === 'string') return part;
+      if (!part || typeof part !== 'object') return '';
+
+      const kind = String(part.content_type || part.type || '').toLowerCase();
+      if (/image|audio|video|asset_pointer|file/.test(kind) || part.asset_pointer) return '';
+      if (typeof part.text === 'string') return part.text;
+      if (typeof part.content === 'string') return part.content;
+      if (typeof part.caption === 'string') return part.caption;
+      if (Array.isArray(part.parts)) return part.parts.map((item) => this.extractApiPart(item)).filter(Boolean).join('\n');
+      return '';
+    }
+
+    extractApiContent(message) {
+      const content = message?.content || {};
+      const type = String(content.content_type || '').toLowerCase();
+      const hiddenTypes = new Set([
+        'thoughts',
+        'reasoning',
+        'reasoning_recap',
+        'model_editable_context',
+        'user_editable_context',
+        'system_content',
+      ]);
+      if (hiddenTypes.has(type)) return '';
+
+      let body = '';
+      if (Array.isArray(content.parts)) {
+        body = content.parts.map((part) => this.extractApiPart(part)).filter(Boolean).join('\n\n');
+      } else if (typeof content.text === 'string') {
+        body = content.text;
+      } else if (typeof content.result === 'string') {
+        body = content.result;
+      }
+
+      if (type === 'code' && body.trim()) {
+        const language = String(content.language || message?.metadata?.language || '').trim();
+        body = `\`\`\`${language}\n${body.replace(/\n+$/, '')}\n\`\`\``;
+      }
+
+      const attachments = this.getAttachmentNames(message);
+      if (attachments.length) {
+        const marker = `> [附件：${attachments.join('、')}]`;
+        body = body.trim() ? `${marker}\n\n${body}` : marker;
+      }
+
+      return this.normalizeMessageBody(body);
+    }
+
+    isApiMessageVisible(message) {
+      if (!message || typeof message !== 'object') return false;
+      const role = message.author?.role;
+      if (role !== 'user' && role !== 'assistant') return false;
+
+      const metadata = message.metadata || {};
+      if (
+        metadata.is_visually_hidden_from_conversation === true
+        || metadata.is_hidden === true
+        || metadata.hidden === true
+        || String(metadata.channel || '').toLowerCase() === 'analysis'
+      ) return false;
+
+      const recipient = String(message.recipient || 'all');
+      if (role === 'assistant' && recipient && !['all', 'assistant'].includes(recipient)) return false;
+      return true;
+    }
+
+    linearizeActiveBranch(tree) {
+      const mapping = tree?.mapping;
+      let currentId = tree?.current_node;
+      if (!mapping || typeof mapping !== 'object' || !currentId || !mapping[currentId]) return [];
+
+      const chain = [];
+      const seen = new Set();
+      while (currentId && mapping[currentId] && !seen.has(currentId)) {
+        seen.add(currentId);
+        const node = mapping[currentId];
+        chain.push(node);
+        currentId = node?.parent || '';
+      }
+      chain.reverse();
+      return chain;
+    }
+
+    messagesFromApiTree(tree) {
+      const messages = [];
+      for (const node of this.linearizeActiveBranch(tree)) {
+        const message = node?.message;
+        if (!this.isApiMessageVisible(message)) continue;
+        const content = this.extractApiContent(message);
+        if (!content) continue;
+        const role = message.author.role;
+        const id = String(message.id || node.id || `api-${messages.length}`);
+
+        // Tool-assisted answers can contain several adjacent visible assistant
+        // fragments. Merge them so the export matches the single response shown
+        // in the UI instead of creating artificial extra turns.
+        const previous = messages[messages.length - 1];
+        if (previous?.role === role && role === 'assistant') {
+          previous.content = this.normalizeMessageBody(`${previous.content}\n\n${content}`);
+          previous.sourceIds = [...(previous.sourceIds || [previous.id]), id];
+          continue;
+        }
+
+        messages.push({
+          index: messages.length,
+          id,
+          role,
+          content,
+          ...(Number.isFinite(Number(message.create_time)) ? { createTime: Number(message.create_time) } : {}),
+        });
+      }
+      messages.forEach((message, index) => { message.index = index; });
+      return messages;
+    }
+
+    invalidateApiTreeCache(conversationId = '') {
+      const currentId = this.getConversationId();
+      if (conversationId && currentId && conversationId !== currentId) return;
+      this.apiTreeCache = { conversationId: currentId, tree: null, fetchedAt: 0, promise: null };
+      this.apiOutlineCache = { conversationId: currentId, currentNode: '', items: [] };
+    }
+
+    buildConversationOutline(tree) {
+      const items = [];
+      for (const node of this.linearizeActiveBranch(tree)) {
+        const message = node?.message;
+        if (!this.isApiMessageVisible(message) || message.author?.role !== 'user') continue;
+        const fullLabel = this.extractApiContent(message);
+        if (!fullLabel) continue;
+        const messageId = String(message.id || node.id || `api-user-${items.length}`);
+        items.push({
+          logicalIndex: items.length,
+          messageId,
+          nodeId: String(node.id || ''),
+          fullLabel,
+          ...(Number.isFinite(Number(message.create_time)) ? { createTime: Number(message.create_time) } : {}),
+        });
+      }
+      return items;
+    }
+
+    getCachedConversationOutlineSync() {
+      const conversationId = this.getConversationId();
+      const cache = this.apiTreeCache;
+      if (!conversationId || cache.conversationId !== conversationId || !cache.tree) return null;
+      const currentNode = String(cache.tree.current_node || '');
+      if (
+        this.apiOutlineCache.conversationId !== conversationId
+        || this.apiOutlineCache.currentNode !== currentNode
+      ) {
+        this.apiOutlineCache = {
+          conversationId,
+          currentNode,
+          items: this.buildConversationOutline(cache.tree),
+        };
+      }
+      return {
+        conversationId,
+        currentNode,
+        title: this.normalizeMessageBody(cache.tree.title) || this.getDomTitle(),
+        items: this.apiOutlineCache.items,
+        fetchedAt: cache.fetchedAt,
+      };
+    }
+
+    async fetchConversationTree(options = {}) {
+      const conversationId = this.getConversationId();
+      if (!conversationId) return null;
+
+      const force = Boolean(options.force);
+      const maxAgeMs = Math.max(0, Number(options.maxAgeMs ?? this.apiTreeDefaultMaxAgeMs) || 0);
+      const cache = this.apiTreeCache;
+      if (
+        !force
+        && cache.conversationId === conversationId
+        && cache.tree
+        && Date.now() - cache.fetchedAt <= maxAgeMs
+      ) {
+        return { conversationId, tree: cache.tree, cached: true };
+      }
+      if (cache.conversationId === conversationId && cache.promise) return cache.promise;
+
+      const request = (async () => {
+        const pageFetch = this.getPageFetch();
+        const sessionResponse = await pageFetch('/api/auth/session', {
+          credentials: 'include',
+          cache: 'no-store',
+          headers: { Accept: 'application/json' },
+        });
+        if (!sessionResponse.ok) throw new Error(`读取登录会话失败（HTTP ${sessionResponse.status}）`);
+
+        const authSession = await sessionResponse.json();
+        const accessToken = authSession?.accessToken;
+        if (!accessToken) throw new Error('当前登录会话没有可用 accessToken');
+
+        const response = await pageFetch(`/backend-api/conversation/${encodeURIComponent(conversationId)}`, {
+          method: 'GET',
+          credentials: 'include',
+          cache: 'no-store',
+          headers: {
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+        });
+        if (!response.ok) throw new Error(`读取完整会话失败（HTTP ${response.status}）`);
+
+        const tree = await response.json();
+        if (!tree?.mapping || !tree?.current_node) throw new Error('完整会话接口返回的数据结构不完整');
+
+        if (this.getConversationId() === conversationId) {
+          this.apiTreeCache = { conversationId, tree, fetchedAt: Date.now(), promise: null };
+          this.apiOutlineCache = { conversationId, currentNode: '', items: [] };
+        }
+        return { conversationId, tree, cached: false };
+      })();
+
+      this.apiTreeCache = {
+        conversationId,
+        tree: cache.conversationId === conversationId ? cache.tree : null,
+        fetchedAt: cache.conversationId === conversationId ? cache.fetchedAt : 0,
+        promise: request,
+      };
+      try {
+        return await request;
+      } finally {
+        if (this.apiTreeCache.conversationId === conversationId && this.apiTreeCache.promise === request) {
+          this.apiTreeCache.promise = null;
+        }
+      }
+    }
+
+    async getConversationOutline(options = {}) {
+      const payload = await this.fetchConversationTree(options);
+      if (!payload) return null;
+      const { conversationId, tree } = payload;
+      const items = this.buildConversationOutline(tree);
+      if (this.getConversationId() === conversationId) {
+        this.apiOutlineCache = {
+          conversationId,
+          currentNode: String(tree.current_node || ''),
+          items,
+        };
+      }
+      return {
+        conversationId,
+        currentNode: String(tree.current_node || ''),
+        title: this.normalizeMessageBody(tree.title) || this.getDomTitle(),
+        items,
+        fetchedAt: this.apiTreeCache.fetchedAt,
+      };
+    }
+
+    async collectApi() {
+      // 用户主动导出时优先保证“此刻完整”，不能因为目录缓存而漏掉刚发送的消息。
+      const payload = await this.fetchConversationTree({ force: true, maxAgeMs: 0 });
+      if (!payload) return null;
+      const { conversationId, tree } = payload;
+      const messages = this.messagesFromApiTree(tree);
+      if (!messages.length) throw new Error('完整会话接口没有解析出可见的用户/助手消息');
+
+      return {
+        schema: 'cgpt-unified-session-export/v1',
+        source: 'api',
+        conversationId,
+        title: this.normalizeMessageBody(tree.title) || this.getDomTitle(),
+        url: location.href,
+        exportedAt: new Date().toISOString(),
+        messages,
+      };
+    }
+
+    async collect() {
+      const conversationId = this.getConversationId();
+      if (conversationId) {
+        try {
+          const apiSession = await this.collectApi();
+          if (apiSession?.messages?.length) return apiSession;
+        } catch (error) {
+          const key = `${conversationId}:${error?.message || error}`;
+          if (this.apiFailureLoggedFor !== key) {
+            this.apiFailureLoggedFor = key;
+            console.warn('[ChatGPT 会话导出] API 完整导出失败，回退到 DOM 快照：', error);
+          }
+        }
+      }
+      return this.collectDom();
+    }
+
+    toMarkdown(session) {
       const lines = [
         `# ${session.title}`,
         '',
         `- 导出时间：${session.exportedAt}`,
         `- 来源：${session.url}`,
         `- 消息数：${session.messages.length}`,
+        `- 数据源：${session.source === 'api' ? 'ChatGPT 完整会话接口（当前分支）' : '页面 DOM 快照（回退模式）'}`,
         '',
         '---',
         '',
@@ -188,24 +553,32 @@
       return lines.join('\n');
     }
 
-    toText(session = this.collect()) {
+    toText(session) {
       return session.messages.map((message, index) =>
         `[${index + 1}] ${message.role === 'user' ? '用户' : 'ChatGPT'}\n${message.content}`
       ).join('\n\n' + '-'.repeat(72) + '\n\n');
     }
 
-    serialize(format, session = this.collect()) {
+    serialize(format, session) {
       if (format === 'json') return JSON.stringify(session, null, 2);
       if (format === 'txt') return this.toText(session);
       return this.toMarkdown(session);
     }
 
-    download(format = 'markdown') {
-      const session = this.collect();
+    async download(format = 'markdown') {
+      let session;
+      try {
+        session = await this.collect();
+      } catch (error) {
+        console.error('[ChatGPT 会话导出] 导出失败：', error);
+        window.alert(`导出失败：${error?.message || error}`);
+        return false;
+      }
       if (!session.messages.length) {
         window.alert('暂未找到可导出的会话内容。');
         return false;
       }
+
       const normalized = format === 'md' ? 'markdown' : format;
       const extension = normalized === 'markdown' ? 'md' : normalized;
       const mime = normalized === 'json' ? 'application/json' : 'text/plain';
@@ -222,7 +595,13 @@
     }
 
     async copyMarkdown() {
-      const session = this.collect();
+      let session;
+      try {
+        session = await this.collect();
+      } catch (error) {
+        console.error('[ChatGPT 会话导出] 复制失败：', error);
+        return false;
+      }
       if (!session.messages.length) return false;
       const text = this.toMarkdown(session);
       try {
@@ -940,7 +1319,7 @@
     }
   }
 
-  runtime.sessionExporter = runtime.sessionExporter || new SessionExporter();
+  runtime.sessionExporter = new SessionExporter();
   runtime.promptLibrary = runtime.promptLibrary || new PromptLibrary();
 })();
 
@@ -982,8 +1361,20 @@
     // 目录跳转动画。系统开启“减少动态效果”时会自动禁用动画。
     answerTocSmoothScroll: true,
 
-    // 以视口从上往下 28% 的位置作为“当前章节”判定线。
+    // 以视口从上往下 28% 的位置作为“当前章节 / 当前回答”阅读指针。
     answerTocActiveLineRatio: 0.28,
+
+    // 章节切换迟滞区，避免标题在阅读指针附近来回抖动。
+    answerTocActiveHysteresisPx: 38,
+
+    // 点击章节后，将标题放在视口约 22% 高度，而不是紧贴顶部。
+    answerTocJumpLineRatio: 0.22,
+
+    // 用户正在手动浏览章节列表时，暂停目录自身的自动卷回。
+    answerTocManualBrowseHoldMs: 1500,
+
+    // 自动派生章节的常规质量门槛；不足时仅按分布补少量兜底章节。
+    answerTocDerivedMinScore: 60,
 
     // 为官方右侧问答导航预留的最小空间。
     answerTocFallbackInlineEndPx: 68,
@@ -1209,6 +1600,15 @@
       this.headings = [];
       this.itemButtons = [];
       this.activeIndex = -1;
+      this.pendingHeadingIndex = -1;
+      this.pendingHeadingUntil = 0;
+      this.pendingHeadingTimer = 0;
+      this.headingJumpToken = 0;
+      this.headingJumpSettleTimer = 0;
+      this.headingJumpScrollTarget = null;
+      this.headingJumpScrollEndHandler = null;
+      this.headingNavPointerInside = false;
+      this.headingNavUserActiveUntil = 0;
 
       this.conversationItems = [];
       this.conversationItemButtons = [];
@@ -1230,6 +1630,15 @@
       this.conversationLabelHydrating = false;
       this.conversationLabelHydrationContext = null;
       this.conversationLabelHydrationAttempts = new Map();
+
+      // API-first 完整问答目录。只缓存当前会话当前分支的 user 节点；
+      // 页面 DOM 可以继续按性能策略卸载，不影响目录总数和标题。
+      this.apiConversationOutline = null;
+      this.apiConversationRefreshTimer = 0;
+      this.apiConversationRefreshForce = false;
+      this.apiConversationRefreshToken = 0;
+      this.apiConversationRefreshInFlight = false;
+      this.apiConversationLastErrorKey = '';
 
       this.mainElement = null;
       this.mainObserver = null;
@@ -1311,6 +1720,7 @@
       this.bindMainObserver();
       this.syncOfficialConversationNav();
       this.rebuildConversationToc();
+      this.scheduleApiConversationOutlineRefresh(40, true);
       this.updateInlineEndOffset();
       this.syncVisibility();
 
@@ -1747,12 +2157,12 @@
             font-size: 12.5px;
           }
 
-          .toc-item[data-level="3"],
-          .toc-item[data-level="4"] {
+          .toc-item[data-level="3"] {
             padding-inline-start: 38px;
             font-size: 12px;
           }
 
+          .toc-item[data-level="4"],
           .toc-item[data-level="5"],
           .toc-item[data-level="6"] {
             padding-inline-start: 50px;
@@ -2023,6 +2433,19 @@
       this.panel.addEventListener('pointerleave', this.onPanelPointerLeave);
       this.panel.addEventListener('click', this.onPanelClickCapture, true);
 
+      this.tocNav?.addEventListener('pointerenter', () => {
+        this.headingNavPointerInside = true;
+      });
+      this.tocNav?.addEventListener('pointerleave', () => {
+        this.headingNavPointerInside = false;
+        this.markHeadingNavInteraction(360);
+      });
+      for (const eventName of ['wheel', 'touchstart', 'pointerdown', 'keydown']) {
+        this.tocNav?.addEventListener(eventName, () => this.markHeadingNavInteraction(), {
+          passive: eventName !== 'keydown',
+        });
+      }
+
       this.panelHeader?.addEventListener('pointerdown', (event) => {
         const target = event.target;
         if (target instanceof Element && target.closest('button, a, input, textarea, select')) {
@@ -2248,6 +2671,11 @@
 
     setActiveView(view, persist = true) {
       const nextView = view === 'conversation' || view === 'prompts' ? view : 'headings';
+      if (nextView !== 'headings') {
+        // 隐藏章节列表时 pointerleave 不一定会触发，主动清掉“用户仍在浏览目录”的状态。
+        this.headingNavPointerInside = false;
+        this.headingNavUserActiveUntil = 0;
+      }
       if (nextView === this.activeView) {
         this.applyActiveView();
         return;
@@ -2615,7 +3043,12 @@
 
       this.cancelHoverExpand();
       this.cancelHoverCollapse();
-      if (nextCollapsed) this.cancelConversationLabelHydration();
+      if (nextCollapsed) {
+        this.cancelConversationLabelHydration();
+        // 键盘/Escape 收起时列表会直接 hidden，浏览器可能不会补发 pointerleave。
+        this.headingNavPointerInside = false;
+        this.headingNavUserActiveUntil = 0;
+      }
 
       if (!nextCollapsed && source === 'hover') {
         this.transientHoverOpen = true;
@@ -3206,6 +3639,9 @@
         this.maxObservedOfficialLogicalIndex = -1;
         this.restoreConversationLabelSnapshot();
         this.clearConversationToc();
+        this.apiConversationOutline = null;
+        this.apiConversationRefreshToken += 1;
+        globalThis.__cgptUnifiedRuntimeV1?.sessionExporter?.invalidateApiTreeCache?.();
       } else {
         // React 仅替换 main 或 URL 查询参数变化时保留完整问答目录快照。
         this.lastConversationSignature = '';
@@ -3216,6 +3652,7 @@
       this.bindMainObserver();
       this.syncOfficialConversationNav();
       this.scheduleConversationRebuild(80);
+      this.scheduleApiConversationOutlineRefresh(120, routeChanged);
       this.updateInlineEndOffset();
       this.requestFrame(true);
     }
@@ -3282,8 +3719,15 @@
         assistantAdded = true;
       }
 
-      if (conversationChanged) this.scheduleConversationRebuild();
-      if (assistantAdded) this.requestFrame(true);
+      if (conversationChanged) {
+        this.scheduleConversationRebuild();
+        this.scheduleApiConversationOutlineRefresh(420, true);
+      }
+      if (assistantAdded) {
+        this.requestFrame(true);
+        // 新回答节点出现时再补一次强制刷新，覆盖“发送后 API 尚未落库”的短窗口。
+        this.scheduleApiConversationOutlineRefresh(700, true);
+      }
     }
 
     requestFrame(forceAnswerDetection) {
@@ -3338,6 +3782,16 @@
       const width = document.documentElement.clientWidth;
       const height = document.documentElement.clientHeight;
       if (width < 1 || height < 1) return null;
+
+      // 阅读指针优先：当前章节与当前回答尽量使用同一条 28% 活动线。
+      // 若活动线恰好落在空白/浮层，再退回原来的多点加权算法。
+      const activeY = Math.min(height - 1, Math.max(0, this.getActiveLineViewportY()));
+      for (const xRatio of [0.5, 0.42, 0.58]) {
+        const x = Math.min(width - 1, Math.max(0, width * xRatio));
+        const element = document.elementFromPoint(x, activeY);
+        const answer = element?.closest?.('[data-message-author-role="assistant"]');
+        if (answer) return answer;
+      }
 
       const yRatios = [
         this.config.answerTocActiveLineRatio,
@@ -3433,6 +3887,7 @@
       this.currentContentRoot = null;
       this.currentScrollRoot = null;
       this.activeIndex = -1;
+      this.cancelHeadingJump();
       this.lastScrollTop = 0;
       window.clearTimeout(this.answerDetectionTimer);
       this.answerDetectionTimer = 0;
@@ -3526,6 +3981,7 @@
         if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1;
         return 0;
       });
+      this.normalizeOutlineLevels(headings);
 
       // 正式 H1-H6 一律完整保留；answerTocDerivedMaxItems 只限制自动派生项。
       this.headings = headings;
@@ -3536,6 +3992,72 @@
       this.applyActiveIndex(nextActiveIndex, false);
       this.updateViewMeta();
       this.syncVisibility();
+    }
+
+    normalizeOutlineLevels(headings) {
+      /*
+       * 正式 H1-H6 单独建立层级栈。派生章节只能“挂在”最近的正式章节下，
+       * 绝不能进入这个栈，否则一个正文候选会改变后续 H3/H4 的真实父子关系。
+       */
+      const formalStack = [];
+      const formalItems = headings.filter((heading) => !heading.derived);
+      for (const heading of formalItems) {
+        const rawLevel = Math.min(6, Math.max(1, Number(heading.level) || 2));
+        while (formalStack.length && formalStack[formalStack.length - 1].rawLevel >= rawLevel) {
+          formalStack.pop();
+        }
+        heading.rawLevel = rawLevel;
+        heading.displayLevel = Math.min(4, formalStack.length + 1);
+        formalStack.push({ rawLevel, displayLevel: heading.displayLevel });
+      }
+
+      let previousFormal = null;
+      const hasFormal = formalItems.length > 0;
+      for (const heading of headings) {
+        const rawLevel = Math.min(6, Math.max(1, Number(heading.level) || 2));
+        heading.rawLevel = rawLevel;
+        if (!heading.derived) {
+          previousFormal = heading;
+          continue;
+        }
+
+        // 完全没有 Markdown 标题时，自动识别出的章节彼此都是一级章节。
+        // 有正式标题时，派生项作为最近正式章节的一级子项显示。
+        heading.displayLevel = !hasFormal || !previousFormal
+          ? 1
+          : Math.min(4, (previousFormal.displayLevel || 1) + 1);
+      }
+      return headings;
+    }
+
+    extractOutlineSentence(value) {
+      const source = this.normalizeText(value ?? '').replace(/\*\*([^*]+)\*\*/g, '$1');
+      if (!source) return '';
+
+      const endpoints = [];
+      const lineBreak = source.indexOf('\n');
+      if (lineBreak >= 0) endpoints.push(lineBreak);
+
+      // 中文句号后通常没有空格，不能沿用英文的“标点 + 空格”分句规则。
+      const cjk = /[。！？]/u.exec(source);
+      if (cjk) endpoints.push(cjk.index + cjk[0].length);
+
+      // 英文句号保守要求后接空白或文本结束，避免把 3.14 / v1.3.1 切碎。
+      const latin = /[.!?](?=\s|$)/u.exec(source);
+      if (latin) endpoints.push(latin.index + latin[0].length);
+
+      const end = endpoints.length ? Math.min(...endpoints) : source.length;
+      return source.slice(0, end).trim();
+    }
+
+    canonicalOutlineLabel(value) {
+      return this.normalizeText(value ?? '')
+        .toLocaleLowerCase()
+        .replace(
+          /^\s*(?:(?:第\s*)?[一二三四五六七八九十百零〇\d]+\s*(?:章|节|部分|篇|卷|单元)\s*[：:、.．)）-]?\s*|[一二三四五六七八九十百零〇]+\s*[、.．：:)）]\s*|\d+(?:\.\d+)*(?:\s*[.)、：:．-]\s*|\s+)|[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]\s*)/u,
+          '',
+        )
+        .replace(/[\s\p{P}\p{S}]+/gu, '');
     }
 
     collectDerivedOutline() {
@@ -3551,7 +4073,7 @@
       const makeItem = (element, level, prefix = '') => {
         const raw = this.normalizeText(element.textContent ?? '');
         if (raw.length < minLength) return null;
-        const sentence = raw.split(/(?<=[。！？.!?])\s+|\n+/)[0] || raw;
+        const sentence = this.extractOutlineSentence(raw) || raw;
         const fullLabel = prefix + sentence.slice(0, 220);
         return {
           element,
@@ -3611,6 +4133,7 @@
       const root = markdownRoot || answer;
       const minLength = Math.max(3, Number(this.config.answerTocDerivedMinTextLength) || 8);
       const maxItems = Math.max(3, Number(this.config.answerTocDerivedMaxItems) || 18);
+      const minScore = Math.max(0, Number(this.config.answerTocDerivedMinScore) || 60);
       const totalTextLength = this.normalizeText(root.textContent ?? '').length;
       const separatorTarget = Math.min(6, root.querySelectorAll('hr').length + 1);
       const targetCount = Math.min(maxItems, Math.max(
@@ -3622,7 +4145,8 @@
       if (!needed) return [];
 
       const existingElements = new Set(existing.map((item) => item.element));
-      const existingLabels = new Set(existing.map((item) => this.normalizeText(item.fullLabel ?? '').toLocaleLowerCase()));
+      const canonicalLabel = (value) => this.canonicalOutlineLabel(value);
+      const existingLabels = new Set(existing.map((item) => canonicalLabel(item.fullLabel)));
       const belongsToAnswer = (element) =>
         element.closest('[data-message-author-role="assistant"]') === answer
         && !element.closest('[hidden], [aria-hidden="true"]');
@@ -3633,16 +4157,17 @@
         if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1;
         return 0;
       };
+      const sentenceFrom = (value) => this.extractOutlineSentence(value);
       const makeItem = (element, labelOverride = '', level = 3) => {
         if (!(element instanceof HTMLElement) || existingElements.has(element) || !belongsToAnswer(element)) return null;
         const raw = this.normalizeText(element.textContent ?? '');
-        const source = this.normalizeText(labelOverride || raw)
-          .replace(/\*\*([^*]+)\*\*/g, '$1');
+        const source = this.normalizeText(labelOverride || raw).replace(/\*\*([^*]+)\*\*/g, '$1');
         if (raw.length < minLength || source.length < 2) return null;
-        const sentence = source.split(/[。！？.!?](?:\s+|$)|\n+/)[0] || source;
+        const sentence = sentenceFrom(source);
         const prefix = element.tagName === 'PRE' ? '代码：' : element.tagName === 'TABLE' ? '表格：' : '';
         const fullLabel = (prefix + sentence).slice(0, 220);
-        if (existingLabels.has(this.normalizeText(fullLabel).toLocaleLowerCase())) return null;
+        const key = canonicalLabel(fullLabel);
+        if (!key || existingLabels.has(key)) return null;
         return {
           element,
           level,
@@ -3666,6 +4191,21 @@
         const label = this.normalizeText(strong.textContent ?? '');
         return label.length >= 2 && label.length <= 100 ? label : '';
       };
+      const looksLikeNumberedTitle = (label) => /^(?:#{0,6}\s*)?(?:\d+(?:\.\d+)*(?:[.)、：:．-]|\s+)|[一二三四五六七八九十百零〇]+[、.．：:)）]|第[一二三四五六七八九十百零〇\d]+(?:章|节|部分|篇|卷|单元)|[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳])\s*\S+/.test(label);
+      const lowSignalLead = /^(?:所以|因此|那么|然后|接下来|另外|不过|但是|其实|当然|总之|换句话说|也就是说|可以看到|这意味着|这里|此时|现在)/;
+      const scoreLabel = (item, baseScore) => {
+        const label = this.normalizeText(item?.fullLabel ?? '');
+        if (!label) return -Infinity;
+        let score = baseScore;
+        if (looksLikeNumberedTitle(label)) score += 20;
+        if (label.length <= 48) score += 9;
+        else if (label.length <= 88) score += 4;
+        else if (label.length > 150) score -= 14;
+        if (lowSignalLead.test(label)) score -= 24;
+        if (/^[“"'（(]?\S.{16,}[。！？.!?]$/.test(label)) score -= 8;
+        if (item.element.tagName === 'PRE' || item.element.tagName === 'TABLE') score -= 3;
+        return score;
+      };
 
       const blockSelector = 'p, blockquote, pre, ul, ol, table';
       const blocks = Array.from(root.querySelectorAll(blockSelector))
@@ -3679,22 +4219,23 @@
       if (!blocks.length) return existing.length ? [] : this.collectDerivedOutline();
 
       const candidates = new Map();
-      const offer = (element, labelOverride, level, priority) => {
+      const offer = (element, labelOverride, level, baseScore, sourceKind) => {
         const item = makeItem(element, labelOverride, level);
         if (!item) return;
+        const score = scoreLabel(item, baseScore);
         const current = candidates.get(element);
-        if (!current || priority < current.priority) candidates.set(element, { item, priority });
+        if (!current || score > current.score) candidates.set(element, { item, score, sourceKind });
       };
 
       const firstExisting = existing.map((item) => item.element).filter(Boolean).sort(compareElements)[0] || null;
       const leadingBlock = blocks.find((block) => !firstExisting
         || Boolean(block.compareDocumentPosition(firstExisting) & Node.DOCUMENT_POSITION_FOLLOWING));
-      if (leadingBlock) offer(leadingBlock, '', 2, 0);
+      if (leadingBlock) offer(leadingBlock, '', 2, 62, 'lead');
 
       for (const element of root.querySelectorAll('p, li')) {
         if (!(element instanceof HTMLElement) || !belongsToAnswer(element)) continue;
         const leadingLabel = extractLeadingLabel(element);
-        if (leadingLabel) offer(element, leadingLabel, element.tagName === 'LI' ? 4 : 3, 1);
+        if (leadingLabel) offer(element, leadingLabel, element.tagName === 'LI' ? 4 : 3, 82, 'strong');
       }
 
       const boundaryNodes = Array.from(root.querySelectorAll('hr, h1, h2, h3, h4, h5, h6, p, blockquote, pre, ul, ol, table'))
@@ -3703,17 +4244,46 @@
         if (boundaryNodes[index].tagName !== 'HR') continue;
         const next = boundaryNodes.slice(index + 1).find((element) => element.tagName !== 'HR');
         if (!next || /^H[1-6]$/.test(next.tagName) || existingElements.has(next)) continue;
-        offer(next, '', 3, 2);
+        offer(next, '', 3, 72, 'separator');
       }
 
+      // 普通正文仅作为低权重候选，避免把“所以/接下来……”之类句子轻易升级为章节。
       const stride = Math.max(1, Math.floor(blocks.length / Math.max(1, needed)));
       blocks.forEach((element, index) => {
-        if (index === 0 || index % stride === 0 || index === blocks.length - 1) offer(element, '', 3, 3);
+        if (index === 0 || index % stride === 0 || index === blocks.length - 1) {
+          offer(element, '', 3, 46, 'distributed');
+        }
       });
 
-      return [...candidates.values()]
-        .sort((a, b) => a.priority - b.priority || compareElements(a.item.element, b.item.element))
-        .slice(0, needed)
+      const ranked = [...candidates.values()]
+        .sort((a, b) => b.score - a.score || compareElements(a.item.element, b.item.element));
+
+      // 不只和正式标题去重，也让不同 DOM 块生成的同名派生章节彼此去重。
+      // 分数更高的候选排在前面，因此自然保留质量更好的那个。
+      const uniqueRanked = [];
+      const seenLabels = new Set(existingLabels);
+      for (const entry of ranked) {
+        const key = canonicalLabel(entry.item.fullLabel);
+        if (!key || seenLabels.has(key)) continue;
+        seenLabels.add(key);
+        uniqueRanked.push(entry);
+      }
+
+      const selected = uniqueRanked.filter((entry) => entry.score >= minScore).slice(0, needed);
+
+      // 完全无正式标题时必须保留可导航性，但兜底只补到目标数量，不再无差别抽正文。
+      if (selected.length < needed && existing.length === 0) {
+        const selectedElements = new Set(selected.map((entry) => entry.item.element));
+        for (const entry of uniqueRanked) {
+          if (selected.length >= needed) break;
+          if (selectedElements.has(entry.item.element)) continue;
+          if (entry.score < 38) continue;
+          selected.push(entry);
+          selectedElements.add(entry.item.element);
+        }
+      }
+
+      return selected
         .map((entry) => entry.item)
         .sort((a, b) => compareElements(a.element, b.element));
     }
@@ -3770,9 +4340,10 @@
         button.className = 'toc-item';
         button.dataset.kind = 'heading';
         button.dataset.headingIndex = String(index);
-        button.dataset.level = String(heading.level);
+        button.dataset.level = String(heading.displayLevel || heading.level || 1);
         button.dataset.active = 'false';
-        button.title = heading.fullLabel;
+        button.dataset.derived = heading.derived ? 'true' : 'false';
+        button.title = heading.derived ? `自动识别章节 · ${heading.fullLabel}` : heading.fullLabel;
 
         label.className = 'toc-item-label';
         label.textContent = heading.label;
@@ -3897,6 +4468,141 @@
         .trim();
     }
 
+    getConversationIdFromLocation() {
+      const match = location.pathname.match(/\/c\/([0-9a-f-]{20,})/i);
+      return match?.[1] || '';
+    }
+
+    getApiConversationOutlineForCurrentRoute() {
+      const conversationId = this.getConversationIdFromLocation();
+      if (!conversationId || this.apiConversationOutline?.conversationId !== conversationId) return null;
+      return Array.isArray(this.apiConversationOutline.items) ? this.apiConversationOutline.items : null;
+    }
+
+    scheduleApiConversationOutlineRefresh(delay = 180, force = false) {
+      if (!this.config.enableConversationToc) return;
+      this.apiConversationRefreshForce ||= Boolean(force);
+      window.clearTimeout(this.apiConversationRefreshTimer);
+      this.apiConversationRefreshTimer = window.setTimeout(() => {
+        this.apiConversationRefreshTimer = 0;
+        const shouldForce = this.apiConversationRefreshForce;
+        this.apiConversationRefreshForce = false;
+        void this.refreshApiConversationOutline(shouldForce);
+      }, Math.max(0, Number(delay) || 0));
+    }
+
+    async refreshApiConversationOutline(force = false) {
+      if (document.hidden || this.apiConversationRefreshInFlight) {
+        if (force) this.scheduleApiConversationOutlineRefresh(500, true);
+        return;
+      }
+      const exporter = globalThis.__cgptUnifiedRuntimeV1?.sessionExporter;
+      if (!exporter?.getConversationOutline) return;
+      const conversationId = this.getConversationIdFromLocation();
+      if (!conversationId) return;
+
+      this.apiConversationRefreshInFlight = true;
+      const token = ++this.apiConversationRefreshToken;
+      const routeKey = this.lastConversationRouteKey;
+      try {
+        const outline = await exporter.getConversationOutline({
+          force: Boolean(force),
+          maxAgeMs: force ? 0 : 8000,
+        });
+        if (
+          token !== this.apiConversationRefreshToken
+          || routeKey !== this.lastConversationRouteKey
+          || outline?.conversationId !== this.getConversationIdFromLocation()
+        ) return;
+        if (outline?.items?.length) {
+          this.apiConversationOutline = outline;
+          this.apiConversationLastErrorKey = '';
+          // API 标签是当前分支的权威目录快照，不需要再通过“逐个点官方目录”补标题。
+          outline.items.forEach((item) => {
+            if (item?.fullLabel) this.conversationLabelCache.set(item.logicalIndex, item.fullLabel);
+          });
+          this.rebuildConversationToc();
+        }
+      } catch (error) {
+        const key = `${conversationId}:${error?.message || error}`;
+        if (this.apiConversationLastErrorKey !== key) {
+          this.apiConversationLastErrorKey = key;
+          console.warn('[ChatGPT 完整问答目录] API 目录读取失败，继续使用 DOM/官方目录回退：', error);
+        }
+      } finally {
+        // 路由切换会递增 token；无论请求属于新旧路由，都必须释放 in-flight 锁。
+        this.apiConversationRefreshInFlight = false;
+      }
+    }
+
+    findApiRecordMatch(apiItem, records, legacyMapping = null) {
+      const identity = apiItem?.messageId ? `message:${apiItem.messageId}` : '';
+      if (identity) {
+        const exact = records.find((record) => record.identity === identity);
+        if (exact) return exact;
+      }
+
+      const normalizedLabel = this.normalizeConversationText(apiItem?.fullLabel || '');
+      if (normalizedLabel) {
+        const labelMatches = records.filter((record) =>
+          this.normalizeConversationText(record.fullLabel || '') === normalizedLabel);
+        if (labelMatches.length === 1) return labelMatches[0];
+      }
+
+      if (legacyMapping?.confident) {
+        const mapped = legacyMapping.recordsByIndex.get(apiItem.logicalIndex);
+        if (mapped) return mapped;
+      }
+      return null;
+    }
+
+    rebuildConversationTocFromApi(apiOutline, records, officialButtons) {
+      const buttonsByIndex = new Map();
+      officialButtons.forEach((button) => {
+        const logicalIndex = Number.parseInt(button.dataset.tocItemIndex ?? '', 10);
+        if (Number.isInteger(logicalIndex) && logicalIndex >= 0) buttonsByIndex.set(logicalIndex, button);
+      });
+      const legacyMapping = this.mapUserRecordsToLogicalIndices(records, officialButtons);
+
+      const items = apiOutline.map((apiItem, logicalIndex) => {
+        const canonical = { ...apiItem, logicalIndex };
+        const mappedRecord = this.findApiRecordMatch(canonical, records, legacyMapping);
+        const officialButton = buttonsByIndex.get(logicalIndex) ?? null;
+        const fullLabel = canonical.fullLabel || `提问 ${logicalIndex + 1}`;
+        if (fullLabel) this.conversationLabelCache.set(logicalIndex, fullLabel);
+        return {
+          logicalIndex,
+          apiMessageId: canonical.messageId || '',
+          apiNodeId: canonical.nodeId || '',
+          userElement: mappedRecord?.userElement ?? null,
+          targetElement: mappedRecord?.targetElement ?? null,
+          officialButton,
+          fullLabel,
+          label: this.formatConversationLabel(fullLabel),
+          mappingConfident: Boolean(mappedRecord),
+          // 目录始终完整显示；这里只标记“目标当前是否挂载”，供视觉提示和跳转策略使用。
+          unloaded: !mappedRecord?.targetElement?.isConnected,
+          source: 'api',
+        };
+      });
+
+      this.conversationItems = items;
+      this.maxObservedOfficialLogicalIndex = Math.max(
+        this.maxObservedOfficialLogicalIndex,
+        items.length - 1,
+      );
+      this.lastConversationSignature = this.getConversationSignature();
+      this.renderConversationItems();
+      const active = this.findActiveConversationIndex();
+      this.activeConversationIndex = -1;
+      this.applyActiveConversationIndex(active, false);
+      this.updateViewMeta();
+      this.syncVisibility();
+      this.persistConversationLabelSnapshot();
+      // API 已提供完整标题，不再运行会主动切换官方目录项的 hydration。
+      this.cancelConversationLabelHydration(false);
+    }
+
     collectUserMessageRecords() {
       return this.getUserMessageElements().map((userElement, index) => ({
         userElement,
@@ -3985,6 +4691,10 @@
       const signature = this.getConversationSignature();
       if (signature !== this.lastConversationSignature) {
         this.scheduleConversationRebuild(40);
+        this.scheduleApiConversationOutlineRefresh(460, true);
+      } else if (!this.getApiConversationOutlineForCurrentRoute()) {
+        // 首次打开超长会话时 DOM 可能看起来完全没变化，但 API 目录仍需要补齐。
+        this.scheduleApiConversationOutlineRefresh(120, false);
       }
     }
 
@@ -4503,6 +5213,17 @@
 
       const records = this.collectUserMessageRecords();
       const officialButtons = this.syncOfficialConversationNav();
+      const apiOutline = this.getApiConversationOutlineForCurrentRoute();
+      if (apiOutline?.length) {
+        this.rebuildConversationTocFromApi(apiOutline, records, officialButtons);
+        return;
+      }
+      const cachedOutline = globalThis.__cgptUnifiedRuntimeV1?.sessionExporter?.getCachedConversationOutlineSync?.();
+      if (cachedOutline?.conversationId === this.getConversationIdFromLocation() && cachedOutline.items?.length) {
+        this.apiConversationOutline = cachedOutline;
+        this.rebuildConversationTocFromApi(cachedOutline.items, records, officialButtons);
+        return;
+      }
       const mapping = this.mapUserRecordsToLogicalIndices(records, officialButtons);
       const items = [];
 
@@ -4789,6 +5510,18 @@
       }
 
       const records = this.collectUserMessageRecords();
+      if (currentItem?.apiMessageId) {
+        const exactRecord = records.find((record) =>
+          record.identity === `message:${currentItem.apiMessageId}`);
+        if (exactRecord) {
+          currentItem.userElement = exactRecord.userElement;
+          currentItem.targetElement = exactRecord.targetElement;
+          currentItem.mappingConfident = true;
+          currentItem.unloaded = !exactRecord.targetElement?.isConnected;
+          return exactRecord.targetElement || exactRecord.userElement;
+        }
+      }
+
       const mapping = this.mapUserRecordsToLogicalIndices(
         records,
         this.getOfficialNavButtons(),
@@ -5022,28 +5755,137 @@
       }
     }
 
+    clearHeadingJumpSettleListener() {
+      window.clearTimeout(this.headingJumpSettleTimer);
+      this.headingJumpSettleTimer = 0;
+      if (this.headingJumpScrollTarget && this.headingJumpScrollEndHandler) {
+        try {
+          this.headingJumpScrollTarget.removeEventListener('scrollend', this.headingJumpScrollEndHandler);
+        } catch {}
+      }
+      this.headingJumpScrollTarget = null;
+      this.headingJumpScrollEndHandler = null;
+    }
+
+    cancelHeadingJump() {
+      this.headingJumpToken += 1;
+      this.clearHeadingJumpSettleListener();
+      this.pendingHeadingIndex = -1;
+      this.pendingHeadingUntil = 0;
+      window.clearTimeout(this.pendingHeadingTimer);
+      this.pendingHeadingTimer = 0;
+    }
+
     jumpToHeading(index) {
       const heading = this.headings[index];
       if (!heading?.element?.isConnected) return;
 
+      this.cancelHeadingJump();
+      const token = this.headingJumpToken;
       const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
       const behavior = this.config.answerTocSmoothScroll && !reduceMotion
         ? 'smooth'
         : 'auto';
 
+      // 跳转完成前固定用户点击的章节，避免 smooth scroll 穿过中间标题时高亮闪烁。
+      const maxHoldMs = behavior === 'smooth' ? 1800 : 260;
+      this.pendingHeadingIndex = index;
+      this.pendingHeadingUntil = performance.now() + maxHoldMs;
       this.applyActiveIndex(index, true);
-      globalThis.__cgptUnifiedRuntimeV1?.beginNavigationLease?.(1800);
-      heading.element.scrollIntoView({
-        behavior,
-        block: 'start',
-        inline: 'nearest',
-      });
+      globalThis.__cgptUnifiedRuntimeV1?.beginNavigationLease?.(behavior === 'smooth' ? 2600 : 900);
+
+      const finish = () => {
+        if (token !== this.headingJumpToken) return;
+        this.clearHeadingJumpSettleListener();
+        if (heading.element.isConnected) {
+          const targetY = this.getJumpLineViewportY();
+          const delta = heading.element.getBoundingClientRect().top - targetY;
+          if (Math.abs(delta) > 8) this.scrollHeadingToReadingLine(heading.element, 'auto');
+        }
+        this.pendingHeadingIndex = -1;
+        this.pendingHeadingUntil = 0;
+        window.clearTimeout(this.pendingHeadingTimer);
+        this.pendingHeadingTimer = 0;
+        this.requestFrame(false);
+      };
+
+      this.scrollHeadingToReadingLine(heading.element, behavior);
+
+      if (behavior === 'smooth') {
+        // Chrome/Edge 支持 scrollend 时等真实动画结束再校正；不支持时走超时兜底。
+        const scrollTarget = this.currentScrollRoot instanceof HTMLElement
+          ? this.currentScrollRoot
+          : document;
+        const startedAt = performance.now();
+        const onScrollEnd = () => {
+          if (token !== this.headingJumpToken) return;
+          // 防止上一段滚动残留的 scrollend 在本次跳转刚开始时误触发。
+          const elapsed = performance.now() - startedAt;
+          if (elapsed < 90) {
+            window.clearTimeout(this.headingJumpSettleTimer);
+            this.headingJumpSettleTimer = window.setTimeout(finish, 100 - elapsed);
+            return;
+          }
+          finish();
+        };
+        this.headingJumpScrollTarget = scrollTarget;
+        this.headingJumpScrollEndHandler = onScrollEnd;
+        try {
+          scrollTarget.addEventListener('scrollend', onScrollEnd, { once: true, passive: true });
+        } catch {}
+        this.headingJumpSettleTimer = window.setTimeout(finish, maxHoldMs);
+      } else {
+        this.headingJumpSettleTimer = window.setTimeout(finish, 80);
+      }
+    }
+
+    getJumpLineViewportY() {
+      const ratio = Math.min(0.75, Math.max(0.08, Number(this.config.answerTocJumpLineRatio) || 0.22));
+      if (this.currentScrollRoot instanceof HTMLElement) {
+        const rect = this.currentScrollRoot.getBoundingClientRect();
+        const top = Math.max(0, rect.top);
+        const bottom = Math.min(window.innerHeight, rect.bottom);
+        return top + Math.max(1, bottom - top) * ratio;
+      }
+      return window.innerHeight * ratio;
+    }
+
+    scrollHeadingToReadingLine(element, behavior = 'auto') {
+      if (!(element instanceof HTMLElement) || !element.isConnected) return;
+      const targetY = this.getJumpLineViewportY();
+      const delta = element.getBoundingClientRect().top - targetY;
+      if (Math.abs(delta) < 1) return;
+
+      if (this.currentScrollRoot instanceof HTMLElement) {
+        this.currentScrollRoot.scrollTo({
+          top: Math.max(0, this.currentScrollRoot.scrollTop + delta),
+          behavior,
+        });
+      } else {
+        const scrollingElement = document.scrollingElement || document.documentElement;
+        const currentTop = window.scrollY || scrollingElement.scrollTop || 0;
+        window.scrollTo({ top: Math.max(0, currentTop + delta), behavior });
+      }
     }
 
     updateActiveHeading() {
       if (!this.headings.length || !this.currentAnswer?.isConnected) return;
 
+      if (
+        this.pendingHeadingIndex >= 0 &&
+        this.pendingHeadingIndex < this.headings.length &&
+        performance.now() < this.pendingHeadingUntil
+      ) {
+        this.applyActiveIndex(this.pendingHeadingIndex, false);
+        return;
+      }
+      if (this.pendingHeadingIndex >= 0) {
+        this.pendingHeadingIndex = -1;
+        this.pendingHeadingUntil = 0;
+      }
+
       const lineY = this.getActiveLineViewportY();
+      const hysteresis = Math.max(0, Number(this.config.answerTocActiveHysteresisPx) || 0);
       const currentScrollTop = this.getScrollTop();
       const viewportSpan = this.getScrollViewportSpan();
       const largeJump = Math.abs(currentScrollTop - this.lastScrollTop) > viewportSpan * 0.8;
@@ -5053,16 +5895,18 @@
       if (index < 0 || index >= this.headings.length || largeJump) {
         index = this.findActiveIndexBinary(lineY);
       } else {
+        // 向下进入新章节时必须越过活动线一点；向上返回旧章节同理。
+        // 这一小段迟滞区能消除触控板慢滚时的 2↔3 抖动。
         while (
           index + 1 < this.headings.length &&
-          this.headings[index + 1].element.getBoundingClientRect().top <= lineY
+          this.headings[index + 1].element.getBoundingClientRect().top <= lineY - hysteresis
         ) {
           index += 1;
         }
 
         while (
           index > 0 &&
-          this.headings[index].element.getBoundingClientRect().top > lineY
+          this.headings[index].element.getBoundingClientRect().top > lineY + hysteresis
         ) {
           index -= 1;
         }
@@ -5112,9 +5956,21 @@
 
       current.dataset.active = 'true';
       current.setAttribute('aria-current', 'location');
-      if (ensureVisible || (!this.collapsed && this.activeView === 'headings')) {
+      if (
+        ensureVisible ||
+        (!this.collapsed && this.activeView === 'headings' && !this.isHeadingNavAutoFollowSuspended())
+      ) {
         this.scrollItemIntoView(this.tocNav, current);
       }
+    }
+
+    markHeadingNavInteraction(duration = this.config.answerTocManualBrowseHoldMs) {
+      const hold = Math.max(250, Number(duration) || 1500);
+      this.headingNavUserActiveUntil = Math.max(this.headingNavUserActiveUntil, performance.now() + hold);
+    }
+
+    isHeadingNavAutoFollowSuspended() {
+      return this.headingNavPointerInside || performance.now() < this.headingNavUserActiveUntil;
     }
 
     scrollItemIntoView(nav, button) {
@@ -5562,7 +6418,8 @@
     const REVEAL_BATCH = 10;
     const MAX_DETACH_PER_IDLE = 18;
     const TOP_REVEAL_THRESHOLD = 150;       // px
-    const BOTTOM_RECOLLAPSE_THRESHOLD = 850; // px
+    const BOTTOM_RECOLLAPSE_THRESHOLD = 850; // px: 可开始回收，但不代表视口应被强制吸到底部
+    const BOTTOM_PIN_THRESHOLD = 96;         // px: 只有真正贴近底部时才维持 bottom pin
     const RECOLLAPSE_DELAY_MS = 850;
 
     // ---------- Scheduling ----------
@@ -5663,8 +6520,14 @@
       return Date.now();
     }
 
+    function isUnifiedNavigationActive() {
+      return document.documentElement?.hasAttribute('data-cgpt-unified-navigation-active') === true;
+    }
+
     function isInteractionHot() {
-      return now() < inputHotUntil;
+      // 目录跳转期间性能模块必须完全让路，避免刚恢复的目标轮次
+      // 在长距离导航重试尚未结束时又被后台回收。
+      return now() < inputHotUntil || isUnifiedNavigationActive();
     }
 
     function hasStopButton() {
@@ -6008,9 +6871,45 @@
     }
 
     function getAllTurnNodes() {
-      const nodes = [...hiddenStore.map((item) => item.node), ...getTurns()];
+      // Parked 节点本身已经脱离 DOM，但它的 placeholder 仍留在原位置。
+      // 以 placeholder 作为排序锚点即可恢复“真实会话顺序”，而不是简单地
+      // 把 parked + live 两组拼接。这样 DOM 回退导出和目录都不会乱序。
+      const records = [
+        ...hiddenStore.map((item, index) => ({
+          node: item.node,
+          anchor: item.placeholder,
+          fallback: index,
+        })),
+        ...getTurns().map((node, index) => ({
+          node,
+          anchor: node,
+          fallback: hiddenStore.length + index,
+        })),
+      ];
       const seen = new Set();
-      return nodes.filter((node) => node instanceof HTMLElement && !seen.has(node) && seen.add(node));
+      const unique = records.filter(({ node }) =>
+        node instanceof HTMLElement && !seen.has(node) && seen.add(node)
+      );
+
+      unique.sort((a, b) => {
+        if (a.anchor === b.anchor) return a.fallback - b.fallback;
+        if (a.anchor?.isConnected && b.anchor?.isConnected) {
+          const relation = a.anchor.compareDocumentPosition(b.anchor);
+          if (relation & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+          if (relation & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+        }
+
+        const getTurnNumber = (node) => {
+          const match = /conversation-turn-(\d+)/i.exec(node?.getAttribute?.('data-testid') || '');
+          return match ? Number.parseInt(match[1], 10) : null;
+        };
+        const an = getTurnNumber(a.node);
+        const bn = getTurnNumber(b.node);
+        if (an != null && bn != null && an !== bn) return an - bn;
+        return a.fallback - b.fallback;
+      });
+
+      return unique.map(({ node }) => node);
     }
 
     function revealAllForNavigation() {
@@ -6125,12 +7024,16 @@
       const afterRestore = getTurns();
       const needDetach = Math.max(0, afterRestore.length - desired);
       if (needDetach > 0) {
-        const nearBottomBefore = isNearBottom();
-        withAnchorCompensation(preserveAnchor && !nearBottomBefore, () => {
+        const pinnedToBottomBefore = isNearBottom(BOTTOM_PIN_THRESHOLD);
+
+        // “允许回收”与“强制贴底”是两件事。用户哪怕距离底部还有几百像素，
+        // 也可能正在读刚生成的上一段内容；此时回收旧 DOM 可以继续做，但
+        // 必须用锚点补偿保持当前阅读位置。
+        withAnchorCompensation(preserveAnchor || !pinnedToBottomBefore, () => {
           detachFirstN(getTurns(), needDetach);
         });
 
-        if (nearBottomBefore) requestAnimationFrame(scrollToBottom);
+        if (pinnedToBottomBefore) requestAnimationFrame(scrollToBottom);
 
         // Chunk very large initial cleanups.
         if (needDetach > MAX_DETACH_PER_IDLE) {
@@ -7035,19 +7938,39 @@
 
   function installAutoScrollLock() {
     const win = getPageWindow();
-    if (win.__cgfcAutoScrollLockInstalledV400) return;
-    win.__cgfcAutoScrollLockInstalledV400 = true;
+    if (win.__cgfcAutoScrollLockInstalledV410) return;
+    win.__cgfcAutoScrollLockInstalledV410 = true;
 
     const ElementCtor = win.Element || Element;
     const HTMLElementCtor = win.HTMLElement || HTMLElement;
     const elementProto = ElementCtor.prototype;
+    const SEND_GUARD_MS = 2800;
+    const POST_GENERATION_GUARD_MS = 900;
+    const NAVIGATION_END_GRACE_MS = 520;
+    const SEND_BUTTON_SELECTOR = [
+      '#composer-submit-button:not([data-testid="stop-button"])',
+      'button[data-testid="send-button"]',
+      'button[data-testid="composer-send-button"]',
+      'button[aria-label*="send" i]',
+      'button[aria-label*="发送" i]',
+    ].join(',');
+    const COMPOSER_EDITOR_SELECTOR = [
+      '#prompt-textarea',
+      'textarea[name="prompt-textarea"]',
+      '.ProseMirror[contenteditable="true"]',
+      '[contenteditable="true"][role="textbox"]',
+    ].join(',');
+
     const state = {
       generating: false,
+      sendGuardUntil: 0,
+      postGenerationUntil: 0,
       lastUserScrollAt: 0,
       windowY: 0,
       elements: new WeakMap(),
       settleTimer: 0,
       restoring: false,
+      navigationActive: false,
     };
 
     function isUnifiedNavigationActive() {
@@ -7056,6 +7979,18 @@
 
     function isLockEnabled() {
       return Boolean(settings.stopAutoScrollWhileGenerating);
+    }
+
+    function isSendGuardActive() {
+      return Date.now() < state.sendGuardUntil;
+    }
+
+    function isPostGenerationGuardActive() {
+      return Date.now() < state.postGenerationUntil;
+    }
+
+    function isAutoScrollLockActive() {
+      return state.generating || isSendGuardActive() || isPostGenerationGuardActive();
     }
 
     function snapshotPositions() {
@@ -7067,6 +8002,40 @@
 
     function isTypingTarget(target) {
       return Boolean(target?.closest?.('input, textarea, select, [contenteditable="true"]'));
+    }
+
+    function isComposerEditor(target) {
+      return Boolean(target?.closest?.(COMPOSER_EDITOR_SELECTOR));
+    }
+
+    function isSendButton(target) {
+      const button = target?.closest?.(SEND_BUTTON_SELECTOR);
+      if (!(button instanceof HTMLElementCtor)) return false;
+      if (button.hasAttribute('disabled') || button.getAttribute('aria-disabled') === 'true') return false;
+
+      // Avoid accidentally treating unrelated “Send feedback” buttons elsewhere
+      // on the page as a chat submission.
+      const form = button.closest('form');
+      if (form?.querySelector?.(COMPOSER_EDITOR_SELECTOR)) return true;
+      const composerShell = button.closest('[data-testid*="composer"], [class*="composer"]');
+      return Boolean(composerShell?.querySelector?.(COMPOSER_EDITOR_SELECTOR));
+    }
+
+    function armSendGuard() {
+      if (!isLockEnabled()) return;
+
+      // Capture BEFORE ChatGPT handles the submit. This closes the small gap where
+      // the UI scrolls to the newly appended turn before the stop/generating button
+      // appears and the old generation detector notices it.
+      snapshotPositions();
+      state.sendGuardUntil = Math.max(state.sendGuardUntil, Date.now() + SEND_GUARD_MS);
+      state.postGenerationUntil = 0;
+    }
+
+    function isSubmitKey(event) {
+      if (event.key !== 'Enter' || event.isComposing) return false;
+      if (event.shiftKey || event.altKey) return false;
+      return isComposerEditor(event.target) || isComposerEditor(document.activeElement);
     }
 
     function markUserScroll(event) {
@@ -7098,32 +8067,33 @@
       return 0;
     }
 
+    function shouldProtectViewport() {
+      return isLockEnabled()
+        && isAutoScrollLockActive()
+        && !isUserScrollWindowOpen()
+        && !isUnifiedNavigationActive();
+    }
+
     function shouldBlockWindowTop(nextTop) {
-      if (!isLockEnabled() || !state.generating || isUserScrollWindowOpen() || isUnifiedNavigationActive()) return false;
+      if (!shouldProtectViewport()) return false;
       return typeof nextTop === 'number' && nextTop > state.windowY + SCROLL_EPSILON_PX;
     }
 
     function shouldBlockElementTop(el, nextTop) {
-      if (!isLockEnabled() || !state.generating || isUserScrollWindowOpen() || isUnifiedNavigationActive()) return false;
+      if (!shouldProtectViewport()) return false;
       const lockedTop = state.elements.get(el);
       const baseline = typeof lockedTop === 'number' ? lockedTop : el.scrollTop || 0;
       return typeof nextTop === 'number' && nextTop > baseline + SCROLL_EPSILON_PX;
     }
 
     function handleScroll(event) {
-      if (!isLockEnabled() || !state.generating || state.restoring || isUnifiedNavigationActive()) return;
+      if (!shouldProtectViewport() || state.restoring) return;
 
       const target = event.target;
       const isWindowScroll = target === document || target === document.documentElement || target === document.body;
       const currentTop = isWindowScroll ? win.scrollY || document.documentElement.scrollTop || 0 : target?.scrollTop;
 
       if (typeof currentTop !== 'number') return;
-      if (isUserScrollWindowOpen()) {
-        if (isWindowScroll) state.windowY = currentTop;
-        else if (target instanceof HTMLElementCtor) state.elements.set(target, currentTop);
-        return;
-      }
-
       const baseline = isWindowScroll ? state.windowY : state.elements.get(target);
       if (typeof baseline !== 'number' || currentTop <= baseline + SCROLL_EPSILON_PX) return;
 
@@ -7199,11 +8169,44 @@
       return false;
     }
 
+    function syncNavigationState() {
+      const active = isUnifiedNavigationActive();
+      if (active === state.navigationActive) return;
+      state.navigationActive = active;
+
+      if (active) {
+        // Navigation has explicit priority. Do not fight a TOC jump with the
+        // pre-send/generation baseline.
+        return;
+      }
+
+      // Once the lease ends, adopt the destination as the new baseline. If a
+      // response is still streaming, subsequent ChatGPT auto-follow attempts are
+      // blocked relative to the place the user intentionally navigated to.
+      snapshotPositions();
+      state.lastUserScrollAt = Date.now() - USER_SCROLL_GRACE_MS + NAVIGATION_END_GRACE_MS;
+    }
+
     function refreshGenerationState() {
       const nextGenerating = isGenerating();
-      if (nextGenerating && !state.generating) snapshotPositions();
-      if (!nextGenerating && state.generating) state.elements = new WeakMap();
+      const wasGenerating = state.generating;
+
+      if (nextGenerating && !wasGenerating) {
+        // If submit guard is already armed, its pre-submit snapshot is the one we
+        // want. Re-snapshotting here would capture ChatGPT's unwanted jump.
+        if (!isSendGuardActive() && !isPostGenerationGuardActive() && !isUnifiedNavigationActive()) {
+          snapshotPositions();
+        }
+        state.postGenerationUntil = 0;
+      }
+
       state.generating = nextGenerating;
+
+      if (!nextGenerating && wasGenerating) {
+        // Keep a short tail guard because ChatGPT and the performance module can
+        // perform final layout/scroll work just after the stop button disappears.
+        state.postGenerationUntil = Date.now() + POST_GENERATION_GUARD_MS;
+      }
     }
 
     function tagWrapper(fn) {
@@ -7268,9 +8271,7 @@
       });
 
       installWrapper(elementProto, 'scrollIntoView', (original) => function (options) {
-        if (!isLockEnabled() || !state.generating || isUserScrollWindowOpen() || isUnifiedNavigationActive()) {
-          return original.call(this, options);
-        }
+        if (!shouldProtectViewport()) return original.call(this, options);
 
         const rect = this.getBoundingClientRect();
         if (rect.top >= 0 && rect.bottom <= win.innerHeight) {
@@ -7279,6 +8280,22 @@
       });
     }
 
+    // Arm before ChatGPT's own handlers run. `submit` is the semantic path;
+    // pointerdown and Enter are early fallbacks for React/composer variants that
+    // mutate the conversation before a native submit event is observable.
+    document.addEventListener('submit', (event) => {
+      const form = event.target;
+      if (form instanceof ElementCtor && form.querySelector?.(COMPOSER_EDITOR_SELECTOR)) armSendGuard();
+    }, true);
+
+    document.addEventListener('pointerdown', (event) => {
+      if (isSendButton(event.target)) armSendGuard();
+    }, true);
+
+    document.addEventListener('keydown', (event) => {
+      if (isSubmitKey(event)) armSendGuard();
+    }, true);
+
     ['wheel', 'touchstart', 'touchmove', 'keydown'].forEach((eventName) => {
       win.addEventListener(eventName, markUserScroll, { capture: true, passive: true });
     });
@@ -7286,21 +8303,33 @@
     document.addEventListener('scroll', handleScroll, { capture: true, passive: true });
 
     wrapScrollApis();
-    refreshAutoScrollLockState = refreshGenerationState;
+    refreshAutoScrollLockState = () => {
+      syncNavigationState();
+      refreshGenerationState();
+    };
 
     let generationRefreshTimer = 0;
-    const queueGenerationRefresh = () => {
+    const queueStateRefresh = () => {
       win.clearTimeout(generationRefreshTimer);
-      generationRefreshTimer = win.setTimeout(refreshGenerationState, 60);
+      generationRefreshTimer = win.setTimeout(() => {
+        syncNavigationState();
+        refreshGenerationState();
+      }, 36);
     };
-    const observer = new MutationObserver(queueGenerationRefresh);
+    const observer = new MutationObserver(queueStateRefresh);
     const start = () => {
+      syncNavigationState();
       refreshGenerationState();
       observer.observe(document.documentElement, {
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ['aria-label', 'data-testid', 'disabled'],
+        attributeFilter: [
+          'aria-label',
+          'data-testid',
+          'disabled',
+          'data-cgpt-unified-navigation-active',
+        ],
       });
       win.setInterval(refreshGenerationState, GENERATION_CHECK_MS);
       win.setInterval(wrapScrollApis, API_GUARD_MS);
