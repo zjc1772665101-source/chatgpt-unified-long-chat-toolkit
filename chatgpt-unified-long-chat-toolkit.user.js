@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT 长对话统一工具箱（性能·导航·提示词·导出·排版）
 // @namespace    local.codex.chatgpt.unified
-// @version      1.3.1
-// @description  合并长对话性能优化、可恢复 DOM 卸载、API 优先完整会话导出与问答目录、经典紧凑 UI、字体与滚动修复；v1.3.1 修正派生章节层级污染、中文分句与编号去重，并以 scrollend 完成章节精确跳转。
+// @version      1.4.3
+// @description  合并长对话性能优化、可恢复 DOM 卸载、API 优先完整会话导出与问答目录、提示词库与安全发送队列、LaTeX 公式复制、经典紧凑 UI、字体与滚动修复；v1.4.3 移除提示词模块中的发送队列区块与入队按钮，只保留输入框右上角的发送队列入口；同时保留公式复制边框颜色可调。
 // @author       Codex；含 Alex S Hamilton 的 ChatGPT Lazy Chat++（GPL-3.0-or-later）
 // @homepageURL  https://github.com/zjc1772665101-source/chatgpt-unified-long-chat-toolkit
 // @supportURL   https://github.com/zjc1772665101-source/chatgpt-unified-long-chat-toolkit/issues
@@ -33,7 +33,7 @@
   const PROMPT_STORAGE_KEY = 'cgpt-unified-prompt-library-v1';
   const runtime = globalThis[RUNTIME_KEY] || (globalThis[RUNTIME_KEY] = {});
 
-  runtime.version = '1.3.1';
+  runtime.version = '1.4.3';
   runtime.lazy = runtime.lazy || null;
   runtime.navigationLeaseTimer = 0;
   runtime.beginNavigationLease = (duration = 3200) => {
@@ -733,7 +733,7 @@
         .prompt-card.drop-before::before, .prompt-card.drop-after::after { position: absolute; right: 5px; left: 5px; z-index: 2; height: 2px; border-radius: 99px; background: #6d5dfc; content: ''; pointer-events: none; }
         .prompt-card.drop-before::before { top: -4px; }
         .prompt-card.drop-after::after { bottom: -4px; }
-        .prompt-card-main { width: 100%; min-width: 0; padding: 0 64px 5px 0; border: 0; background: transparent; color: inherit; text-align: start; cursor: pointer; }
+        .prompt-card-main { width: 100%; min-width: 0; padding: 0 94px 5px 0; border: 0; background: transparent; color: inherit; text-align: start; cursor: pointer; }
         .prompt-card-title { display: flex; min-width: 0; gap: 6px; align-items: center; font-weight: 600; }
         .prompt-card-title-text { display: block; min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .prompt-card-category { flex: none; max-width: 42%; padding: 1px 5px; overflow: hidden; border-radius: 99px; background: color-mix(in srgb, currentColor 9%, transparent); color: var(--text-tertiary, #777); font-size: 10px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
@@ -1048,7 +1048,10 @@
       const pin = this.makeIconButton('pin', item.pinned ? '取消置顶' : '置顶', () => this.togglePin(item.id));
       pin.classList.toggle('active', item.pinned);
       pin.setAttribute('aria-pressed', String(item.pinned));
-      actions.append(pin, this.makeIconButton('edit', '编辑', () => this.openEditor(item)));
+      actions.append(
+        pin,
+        this.makeIconButton('edit', '编辑', () => this.openEditor(item)),
+      );
       card.append(main, actions);
       card.addEventListener('dragstart', (event) => this.handlePromptDragStart(event, item, card));
       card.addEventListener('dragover', (event) => this.handlePromptDragOver(event, item, card));
@@ -1153,10 +1156,10 @@
       }) || null;
     }
 
-    insertIntoComposer(text) {
+    insertIntoComposer(text, options = {}) {
       const composer = this.findComposer();
       if (!composer || typeof composer.focus !== 'function') {
-        window.alert('没有找到 ChatGPT 输入框。请先打开一个可输入的会话。');
+        if (!options.silent) window.alert('没有找到 ChatGPT 输入框。请先打开一个可输入的会话。');
         return false;
       }
       const ownerDocument = composer.ownerDocument || document;
@@ -1256,6 +1259,166 @@
       this.render();
     }
 
+    queuePrompt(item) {
+      const resolved = this.resolveVariables(item.content);
+      if (resolved == null) return;
+      const queued = runtime.messageQueue?.enqueue?.(resolved, { source: 'prompt', promptId: item.id });
+      if (!queued) return;
+      item.useCount += 1;
+      item.lastUsedAt = new Date().toISOString();
+      this.persist();
+      this.render();
+      this.renderQueue();
+    }
+
+    enqueueQueueInput() {
+      const content = String(this.queueInput?.value || '').trim();
+      if (!content) return;
+      const queued = runtime.messageQueue?.enqueue?.(content, { source: 'manual' });
+      if (!queued) return;
+      this.queueInput.value = '';
+      this.queueInput.focus({ preventScroll: true });
+      this.renderQueue();
+    }
+
+    renderQueue() {
+      if (!this.queueList) return;
+      const queue = runtime.messageQueue;
+      const snapshot = queue?.snapshot?.() || { items: [], isPaused: false };
+      const items = snapshot.items || [];
+      if (this.queueCount) this.queueCount.textContent = `发送队列 · ${items.length}`;
+      if (this.queuePauseButton) {
+        this.queuePauseButton.textContent = snapshot.isPaused ? '继续' : '暂停';
+        this.queuePauseButton.title = snapshot.isPaused ? '继续自动发送队列' : '暂停自动发送队列';
+      }
+
+      const fragment = document.createDocumentFragment();
+      if (!items.length) {
+        const empty = document.createElement('div');
+        empty.className = 'queue-empty';
+        empty.textContent = snapshot.isPaused ? '队列为空 · 已暂停' : '队列为空';
+        fragment.appendChild(empty);
+      }
+      const statusText = { pending: '等待', sending: '发送中', failed: '失败' };
+      for (const item of items) {
+        const row = document.createElement('div');
+        row.className = 'queue-item';
+        row.dataset.status = item.status;
+        const text = document.createElement('div');
+        text.className = 'queue-item-text';
+        text.textContent = item.content.replace(/\s+/g, ' ').trim();
+        text.title = item.content;
+        const status = document.createElement('div');
+        status.className = 'queue-item-status';
+        status.textContent = item.status === 'pending' && queue?.isItemOnCurrentConversation?.(item) === false
+          ? '等待原会话'
+          : statusText[item.status] || item.status;
+        const actions = document.createElement('div');
+        actions.className = 'queue-item-actions';
+        if (item.status === 'failed') {
+          const retry = document.createElement('button');
+          retry.type = 'button';
+          retry.textContent = '↻';
+          retry.title = '重试';
+          retry.addEventListener('click', () => queue?.retry?.(item.id));
+          actions.appendChild(retry);
+        }
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.textContent = '×';
+        remove.title = '移出队列';
+        remove.addEventListener('click', () => queue?.remove?.(item.id));
+        actions.appendChild(remove);
+        row.append(text, status, actions);
+        fragment.appendChild(row);
+      }
+      this.queueList.replaceChildren(fragment);
+    }
+
+    getComposerText(composer = this.findComposer()) {
+      if (!composer) return '';
+      const view = composer.ownerDocument?.defaultView || window;
+      const TextareaCtor = view.HTMLTextAreaElement;
+      const InputCtor = view.HTMLInputElement;
+      if ((TextareaCtor && composer instanceof TextareaCtor) || (InputCtor && composer instanceof InputCtor)) {
+        return String(composer.value || '');
+      }
+      return String(composer.innerText || composer.textContent || '');
+    }
+
+    hasComposerContent() {
+      return this.getComposerText().replace(/[\u200B\u200C\u200D\uFEFF]/g, '').trim().length > 0;
+    }
+
+    composerContains(content) {
+      const normalize = (value) => String(value || '')
+        .replace(/[\u200B\u200C\u200D\uFEFF]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const editor = normalize(this.getComposerText());
+      const wanted = normalize(content);
+      return Boolean(editor && wanted && (editor === wanted || editor.includes(wanted) || wanted.includes(editor)));
+    }
+
+    findSendButton(composer = this.findComposer()) {
+      const selectors = [
+        '#composer-submit-button:not([data-testid="stop-button"])',
+        'button[data-testid="send-button"]',
+        'button[data-testid="composer-send-button"]',
+        'button[aria-label*="send" i]',
+        'button[aria-label*="发送" i]',
+      ].join(',');
+      const candidates = Array.from(document.querySelectorAll(selectors));
+      return candidates.find((button) => {
+        if (!(button instanceof HTMLElement) || !button.isConnected) return false;
+        if (button.disabled || button.hasAttribute('disabled') || button.getAttribute('aria-disabled') === 'true') return false;
+        const style = getComputedStyle(button);
+        const rect = button.getBoundingClientRect();
+        if (style.display === 'none' || style.visibility === 'hidden' || rect.width <= 0 || rect.height <= 0) return false;
+        if (!composer) return true;
+        const form = button.closest('form');
+        if (form?.contains(composer)) return true;
+        const shell = button.closest('[data-testid*="composer"], [class*="composer"]');
+        return Boolean(shell?.contains(composer));
+      }) || null;
+    }
+
+    async submitComposer() {
+      const composer = this.findComposer();
+      if (!composer || !this.getComposerText(composer).trim()) return false;
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      let button = null;
+      for (let attempt = 0; attempt < 24; attempt += 1) {
+        button = this.findSendButton(composer);
+        if (button) break;
+        if (runtime.isGenerating?.()) return false;
+        await wait(100);
+      }
+
+      runtime.armSendGuard?.();
+      let dispatched = false;
+      if (button) {
+        button.click();
+        dispatched = true;
+      } else {
+        const form = composer.closest('form');
+        if (form && typeof form.requestSubmit === 'function') {
+          try {
+            form.requestSubmit();
+            dispatched = true;
+          } catch {}
+        }
+      }
+      if (!dispatched) return false;
+
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        await wait(100);
+        if (runtime.isGenerating?.()) return true;
+        if (!this.getComposerText(this.findComposer()).replace(/[\u200B\u200C\u200D\uFEFF]/g, '').trim()) return true;
+      }
+      return false;
+    }
+
     async copyText(text) {
       try {
         await navigator.clipboard.writeText(text);
@@ -1319,8 +1482,759 @@
     }
   }
 
+  class MessageQueue {
+    constructor(runtimeRef) {
+      this.runtime = runtimeRef;
+      this.items = [];
+      this.isPaused = false;
+      this.listeners = new Set();
+      this.timer = 0;
+      this.idleCount = 0;
+      this.isDispatching = false;
+      this.awaitingResponse = null;
+      this.POLL_INTERVAL = 1000;
+      this.IDLE_THRESHOLD = 2;
+      this.POST_SUBMIT_MIN_WAIT_MS = 2500;
+      this.POST_SUBMIT_QUIET_MS = 2500;
+      this.GENERATION_START_GRACE_MS = 8000;
+      this.POST_SUBMIT_MAX_WAIT_MS = 600000;
+    }
+
+    snapshot() {
+      return {
+        items: this.items.map((item) => ({ ...item, metadata: item.metadata ? { ...item.metadata } : undefined })),
+        isPaused: this.isPaused,
+        isProcessing: this.items.some((item) => item.status === 'sending'),
+        awaitingResponse: Boolean(this.awaitingResponse),
+      };
+    }
+
+    subscribe(listener) {
+      if (typeof listener !== 'function') return () => {};
+      this.listeners.add(listener);
+      try { listener(this.snapshot()); } catch {}
+      return () => this.listeners.delete(listener);
+    }
+
+    emit() {
+      const state = this.snapshot();
+      this.listeners.forEach((listener) => {
+        try { listener(state); } catch (error) { console.warn('[发送队列] UI 更新失败：', error); }
+      });
+    }
+
+    enqueue(content, metadata = undefined) {
+      const text = String(content || '').trim();
+      if (!text) return null;
+      const item = {
+        id: `queue-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        content: text,
+        createdAt: Date.now(),
+        status: 'pending',
+        metadata: {
+          ...(metadata && typeof metadata === 'object' ? metadata : {}),
+          conversationId: metadata?.conversationId ?? this.getConversationId(),
+        },
+      };
+      this.items.push(item);
+      this.emit();
+      this.start();
+      return item;
+    }
+
+    enqueueMany(values) {
+      const created = [];
+      for (const value of Array.isArray(values) ? values : []) {
+        const item = typeof value === 'string'
+          ? this.enqueue(value)
+          : this.enqueue(value?.content, value?.metadata);
+        if (item) created.push(item);
+      }
+      return created;
+    }
+
+    remove(id) {
+      const before = this.items.length;
+      this.items = this.items.filter((item) => item.id !== id);
+      if (this.items.length !== before) this.emit();
+    }
+
+    clear() {
+      this.items = [];
+      this.idleCount = 0;
+      this.emit();
+    }
+
+    retry(id) {
+      const item = this.items.find((candidate) => candidate.id === id);
+      if (!item) return false;
+      item.status = 'pending';
+      this.idleCount = 0;
+      this.emit();
+      return true;
+    }
+
+    pause() {
+      if (this.isPaused) return;
+      this.isPaused = true;
+      this.idleCount = 0;
+      this.emit();
+    }
+
+    resume() {
+      if (!this.isPaused) return;
+      this.isPaused = false;
+      this.idleCount = 0;
+      this.emit();
+      this.start();
+    }
+
+    togglePause() {
+      if (this.isPaused) this.resume();
+      else this.pause();
+    }
+
+    start() {
+      if (this.timer) return;
+      this.timer = window.setInterval(() => this.tick(), this.POLL_INTERVAL);
+      window.setTimeout(() => this.tick(), 80);
+    }
+
+    stop() {
+      if (this.timer) window.clearInterval(this.timer);
+      this.timer = 0;
+      this.idleCount = 0;
+    }
+
+    getConversationId() {
+      return location.pathname.match(/\/c\/([0-9a-f-]{20,})/i)?.[1] || '';
+    }
+
+    isItemOnCurrentConversation(item) {
+      const bound = String(item?.metadata?.conversationId || '');
+      return !bound || bound === this.getConversationId();
+    }
+
+    isGenerating() {
+      if (typeof this.runtime.isGenerating === 'function') {
+        try { return Boolean(this.runtime.isGenerating()); } catch {}
+      }
+      const directStop = document.querySelector(
+        '[data-testid="stop-button"], [data-testid="composer-stop-button"], [data-testid*="stop-generating"]'
+      );
+      if (directStop instanceof HTMLElement) {
+        const rect = directStop.getBoundingClientRect();
+        const style = getComputedStyle(directStop);
+        if (rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden') return true;
+      }
+      return false;
+    }
+
+    getConversationActivitySignature() {
+      const assistants = document.querySelectorAll('main [data-message-author-role="assistant"]');
+      const last = assistants[assistants.length - 1];
+      const text = String(last?.textContent || '');
+      return `${assistants.length}:${text.length}:${text.slice(Math.max(0, text.length - 400))}`;
+    }
+
+    getLatestUserTurnSignature() {
+      const users = document.querySelectorAll('main [data-message-author-role="user"]');
+      const last = users[users.length - 1];
+      if (!last) return `0::`;
+      const messageId = last.getAttribute('data-message-id')
+        || last.closest('[data-message-id]')?.getAttribute('data-message-id')
+        || last.closest('[data-testid^="conversation-turn-"]')?.getAttribute('data-testid')
+        || '';
+      const text = String(last.textContent || '')
+        .replace(/[\u200B\u200C\u200D\uFEFF]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      return `${users.length}:${messageId}:${text.length}:${text.slice(Math.max(0, text.length - 240))}`;
+    }
+
+    hasUserTurnAdvanced(item) {
+      const before = String(item?.submitBaseline || '');
+      return Boolean(before && this.getLatestUserTurnSignature() !== before);
+    }
+
+    completeItem(id) {
+      const item = this.items.find((candidate) => candidate.id === id);
+      if (item) item.status = 'sent';
+      this.items = this.items.filter((candidate) => candidate.id !== id);
+      this.emit();
+    }
+
+    startPostSubmitWait() {
+      const now = Date.now();
+      this.awaitingResponse = {
+        sentAt: now,
+        lastActivityAt: now,
+        signature: this.getConversationActivitySignature(),
+        sawGenerating: this.isGenerating(),
+      };
+      this.idleCount = 0;
+    }
+
+    updatePostSubmitWait() {
+      const state = this.awaitingResponse;
+      if (!state) return false;
+      const now = Date.now();
+      const generating = this.isGenerating();
+      if (generating) {
+        state.sawGenerating = true;
+        state.lastActivityAt = now;
+      }
+      const signature = this.getConversationActivitySignature();
+      if (signature !== state.signature) {
+        state.signature = signature;
+        state.lastActivityAt = now;
+      }
+      const elapsed = now - state.sentAt;
+      const quietFor = now - state.lastActivityAt;
+      const generationHadTimeToStart = state.sawGenerating || elapsed >= this.GENERATION_START_GRACE_MS;
+      const done = (
+        elapsed >= this.POST_SUBMIT_MIN_WAIT_MS
+        && quietFor >= this.POST_SUBMIT_QUIET_MS
+        && !generating
+        && generationHadTimeToStart
+      ) || elapsed >= this.POST_SUBMIT_MAX_WAIT_MS;
+      if (done) {
+        this.awaitingResponse = null;
+        this.idleCount = 0;
+        this.emit();
+      }
+      return true;
+    }
+
+    async tick() {
+      if (this.isDispatching) return;
+      if (this.updatePostSubmitWait()) return;
+      if (this.isPaused) {
+        this.idleCount = 0;
+        return;
+      }
+
+      const sending = this.items.find((item) => item.status === 'sending');
+      if (sending) {
+        await this.recoverSendingItem(sending);
+        return;
+      }
+      const pending = this.items.find((item) => item.status === 'pending');
+      if (!pending) {
+        this.idleCount = 0;
+        return;
+      }
+
+      const promptLibrary = this.runtime.promptLibrary;
+      if (!this.isItemOnCurrentConversation(pending)) {
+        this.idleCount = 0;
+        return;
+      }
+      if (!promptLibrary?.findComposer?.()) {
+        this.idleCount = 0;
+        return;
+      }
+      if (promptLibrary.hasComposerContent?.()) {
+        this.idleCount = 0;
+        return;
+      }
+      if (this.isGenerating()) {
+        this.idleCount = 0;
+        return;
+      }
+      this.idleCount += 1;
+      if (this.idleCount < this.IDLE_THRESHOLD) return;
+      this.idleCount = 0;
+      await this.dispatchNext(pending);
+    }
+
+    async dispatchNext(item) {
+      if (!item || this.isDispatching || item.status !== 'pending') return;
+      const promptLibrary = this.runtime.promptLibrary;
+      if (!promptLibrary) return;
+      this.isDispatching = true;
+      item.status = 'sending';
+      this.emit();
+      try {
+        if (this.isGenerating() || promptLibrary.hasComposerContent()) {
+          item.status = 'pending';
+          return;
+        }
+        const inserted = promptLibrary.insertIntoComposer(item.content, { silent: true });
+        if (!inserted) {
+          item.status = 'failed';
+          return;
+        }
+        item.submitBaseline = this.getLatestUserTurnSignature();
+        const submitted = await promptLibrary.submitComposer();
+        if (submitted || this.hasUserTurnAdvanced(item) || !promptLibrary.composerContains(item.content)) {
+          this.completeItem(item.id);
+          this.startPostSubmitWait();
+        } else {
+          // Keep the item in "sending" instead of immediately retrying. The
+          // recovery path waits for another confirmed idle window first.
+          item.status = 'sending';
+        }
+      } catch (error) {
+        console.error('[发送队列] 发送失败：', error);
+        item.status = promptLibrary.composerContains(item.content) ? 'sending' : 'pending';
+      } finally {
+        this.isDispatching = false;
+        this.emit();
+      }
+    }
+
+    async recoverSendingItem(item) {
+      if (!item || this.isDispatching) return;
+      const promptLibrary = this.runtime.promptLibrary;
+      if (!promptLibrary) return;
+      if (!this.isItemOnCurrentConversation(item)) {
+        this.idleCount = 0;
+        return;
+      }
+      if (this.isGenerating()) {
+        this.idleCount = 0;
+        return;
+      }
+      if (this.hasUserTurnAdvanced(item) || !promptLibrary.composerContains(item.content)) {
+        this.completeItem(item.id);
+        this.startPostSubmitWait();
+        return;
+      }
+      this.idleCount += 1;
+      if (this.idleCount < this.IDLE_THRESHOLD) return;
+      this.idleCount = 0;
+      this.isDispatching = true;
+      try {
+        if (!item.submitBaseline) item.submitBaseline = this.getLatestUserTurnSignature();
+        const submitted = await promptLibrary.submitComposer();
+        if (submitted || this.hasUserTurnAdvanced(item) || !promptLibrary.composerContains(item.content)) {
+          this.completeItem(item.id);
+          this.startPostSubmitWait();
+        }
+      } catch (error) {
+        console.error('[发送队列] 重试发送失败：', error);
+      } finally {
+        this.isDispatching = false;
+        this.emit();
+      }
+    }
+  }
+
+  class ComposerQueueDock {
+    constructor(runtimeRef) {
+      this.runtime = runtimeRef;
+      this.root = null;
+      this.capsule = null;
+      this.capsuleLabel = null;
+      this.capsuleBadge = null;
+      this.panel = null;
+      this.countLabel = null;
+      this.pauseButton = null;
+      this.clearButton = null;
+      this.list = null;
+      this.input = null;
+      this.enqueueButton = null;
+      this.status = null;
+      this.isOpen = false;
+      this.unsubscribe = null;
+      this.observer = null;
+      this.resizeObserver = null;
+      this.observedShell = null;
+      this.positionRaf = 0;
+      this.heartbeat = 0;
+      this.started = false;
+      this.onViewportChange = () => this.schedulePosition();
+      this.onDocumentPointerDown = (event) => {
+        if (!this.isOpen || !this.root || this.root.contains(event.target)) return;
+        this.close();
+      };
+    }
+
+    start() {
+      if (this.started) return;
+      this.started = true;
+      this.installStyles();
+      this.unsubscribe = this.runtime.messageQueue?.subscribe?.(() => {
+        this.render();
+        this.schedulePosition();
+      }) || null;
+      window.addEventListener('resize', this.onViewportChange, { passive: true });
+      window.addEventListener('scroll', this.onViewportChange, { capture: true, passive: true });
+      document.addEventListener('pointerdown', this.onDocumentPointerDown, true);
+      const observe = () => {
+        if (this.observer || !document.documentElement) return;
+        this.observer = new MutationObserver(() => this.schedulePosition());
+        this.observer.observe(document.documentElement, { childList: true, subtree: true });
+      };
+      observe();
+      this.heartbeat = window.setInterval(() => this.schedulePosition(), 1200);
+      window.setTimeout(() => {
+        this.ensureRoot();
+        this.render();
+        this.schedulePosition();
+      }, 0);
+    }
+
+    installStyles() {
+      if (document.getElementById('cgpt-unified-composer-queue-style')) return;
+      const style = document.createElement('style');
+      style.id = 'cgpt-unified-composer-queue-style';
+      style.textContent = `
+        #cgpt-unified-queue-dock { position: static; width: 0; height: 0; }
+        #cgpt-unified-queue-dock[hidden] { display: none !important; }
+        .cgpt-queue-capsule,
+        .cgpt-queue-panel { position: fixed; z-index: 2147482500; font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; }
+        .cgpt-queue-capsule { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 5px 10px; border: 1px solid color-mix(in srgb, currentColor 14%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--main-surface-primary, #fff) 92%, transparent); color: var(--text-secondary, #555); box-shadow: 0 4px 16px rgba(0,0,0,.10); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); cursor: pointer; font-size: 12px; font-weight: 600; line-height: 1; user-select: none; transition: transform 120ms ease, box-shadow 120ms ease, background 120ms ease; }
+        .cgpt-queue-capsule:hover { transform: translateY(-1px); background: var(--main-surface-primary, #fff); color: var(--text-primary, #161616); box-shadow: 0 7px 20px rgba(0,0,0,.13); }
+        .cgpt-queue-capsule svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+        .cgpt-queue-capsule-badge { display: inline-flex; min-width: 17px; height: 17px; padding: 0 5px; align-items: center; justify-content: center; border-radius: 999px; background: #6d5dfc; color: #fff; font-size: 10px; font-weight: 700; }
+        .cgpt-queue-capsule-badge[hidden] { display: none !important; }
+        .cgpt-queue-panel { display: flex; width: 420px; max-width: calc(100vw - 24px); flex-direction: column; overflow: hidden; border: 1px solid var(--border-light, rgba(0,0,0,.14)); border-radius: 14px; background: var(--main-surface-primary, var(--bg-primary, #fff)); color: var(--text-primary, #161616); box-shadow: 0 18px 48px rgba(0,0,0,.18), 0 3px 12px rgba(0,0,0,.08); }
+        .cgpt-queue-panel[hidden] { display: none !important; }
+        .cgpt-queue-panel-header { display: flex; min-height: 45px; padding: 8px 10px 8px 12px; align-items: center; gap: 8px; border-bottom: 1px solid var(--border-light, rgba(0,0,0,.1)); }
+        .cgpt-queue-panel-title { margin-right: auto; font-size: 13px; font-weight: 700; }
+        .cgpt-queue-panel-actions { display: flex; gap: 3px; }
+        .cgpt-queue-icon-btn { display: inline-grid; min-width: 29px; height: 29px; padding: 0 7px; place-items: center; border: 0; border-radius: 8px; background: transparent; color: var(--text-secondary, #666); cursor: pointer; font: inherit; font-size: 11px; }
+        .cgpt-queue-icon-btn:hover { background: var(--main-surface-secondary, var(--bg-secondary, #eee)); color: var(--text-primary, #161616); }
+        .cgpt-queue-list { min-height: 38px; max-height: 190px; overflow-y: auto; padding: 8px; scrollbar-width: thin; }
+        .cgpt-queue-empty { padding: 12px 8px; color: var(--text-tertiary, #888); font-size: 12px; text-align: center; }
+        .cgpt-queue-row { display: grid; grid-template-columns: 23px minmax(0, 1fr) auto; gap: 7px; align-items: center; margin-bottom: 5px; padding: 7px; border-radius: 9px; background: color-mix(in srgb, var(--main-surface-secondary, #eee) 48%, transparent); }
+        .cgpt-queue-row[data-status="sending"] { outline: 1px solid color-mix(in srgb, #6d5dfc 42%, transparent); }
+        .cgpt-queue-row[data-status="failed"] { outline: 1px solid color-mix(in srgb, #dc2626 40%, transparent); }
+        .cgpt-queue-index { display: grid; width: 22px; height: 22px; place-items: center; border-radius: 7px; background: var(--main-surface-primary, #fff); color: var(--text-secondary, #666); font-size: 10px; font-weight: 700; }
+        .cgpt-queue-main { min-width: 0; }
+        .cgpt-queue-text { overflow: hidden; color: var(--text-primary, #161616); font-size: 12px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+        .cgpt-queue-item-status { margin-top: 2px; color: var(--text-tertiary, #888); font-size: 10px; }
+        .cgpt-queue-row-actions { display: flex; gap: 2px; }
+        .cgpt-queue-row-actions button { width: 25px; height: 25px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--text-tertiary, #777); cursor: pointer; }
+        .cgpt-queue-row-actions button:hover { background: var(--main-surface-primary, #fff); color: var(--text-primary, #161616); }
+        .cgpt-queue-compose { display: flex; gap: 7px; padding: 9px 10px; align-items: flex-end; border-top: 1px solid var(--border-light, rgba(0,0,0,.1)); }
+        .cgpt-queue-compose textarea { min-width: 0; min-height: 38px; max-height: 112px; flex: 1; padding: 8px 10px; resize: vertical; border: 1px solid var(--border-light, rgba(0,0,0,.15)); border-radius: 9px; background: var(--main-surface-primary, #fff); color: var(--text-primary, #161616); font: inherit; font-size: 12px; line-height: 1.4; outline: none; }
+        .cgpt-queue-compose textarea:focus { border-color: color-mix(in srgb, #6d5dfc 60%, var(--border-light, rgba(0,0,0,.15))); box-shadow: 0 0 0 3px color-mix(in srgb, #6d5dfc 12%, transparent); }
+        .cgpt-queue-enqueue { width: 38px; height: 38px; flex: none; border: 0; border-radius: 9px; background: #6d5dfc; color: #fff; cursor: pointer; font-size: 17px; line-height: 1; }
+        .cgpt-queue-enqueue:disabled { opacity: .45; cursor: default; }
+        .cgpt-queue-footer { display: flex; min-height: 26px; padding: 0 11px 8px; align-items: center; gap: 6px; color: var(--text-tertiary, #888); font-size: 10px; }
+        .cgpt-queue-dot { width: 6px; height: 6px; border-radius: 50%; background: #22c55e; }
+        .cgpt-queue-dot[data-state="paused"] { background: #f59e0b; }
+        .cgpt-queue-dot[data-state="busy"] { background: #6d5dfc; }
+        @media (max-width: 640px) {
+          .cgpt-queue-capsule { min-height: 28px; padding: 4px 8px; font-size: 11px; }
+          .cgpt-queue-panel { width: calc(100vw - 20px); }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .cgpt-queue-capsule { transition: none; }
+        }
+      `;
+      (document.head || document.documentElement)?.appendChild(style);
+    }
+
+    ensureRoot() {
+      if (!document.body) return false;
+      if (this.root?.isConnected) return true;
+      const existing = document.getElementById('cgpt-unified-queue-dock');
+      if (existing) existing.remove();
+
+      const root = document.createElement('div');
+      root.id = 'cgpt-unified-queue-dock';
+      root.hidden = true;
+
+      const capsule = document.createElement('button');
+      capsule.type = 'button';
+      capsule.className = 'cgpt-queue-capsule';
+      capsule.title = '发送队列';
+      capsule.setAttribute('aria-label', '打开发送队列');
+      capsule.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14M5 12h9M5 18h6M17 15v6M14 18h6"/></svg>';
+      const capsuleLabel = document.createElement('span');
+      capsuleLabel.textContent = '发送队列';
+      const badge = document.createElement('span');
+      badge.className = 'cgpt-queue-capsule-badge';
+      badge.hidden = true;
+      capsule.append(capsuleLabel, badge);
+      capsule.addEventListener('click', () => this.open());
+
+      const panel = document.createElement('section');
+      panel.className = 'cgpt-queue-panel';
+      panel.hidden = true;
+      panel.setAttribute('role', 'dialog');
+      panel.setAttribute('aria-label', '发送队列');
+
+      const header = document.createElement('div');
+      header.className = 'cgpt-queue-panel-header';
+      const title = document.createElement('div');
+      title.className = 'cgpt-queue-panel-title';
+      title.textContent = '发送队列 · 0';
+      const headerActions = document.createElement('div');
+      headerActions.className = 'cgpt-queue-panel-actions';
+      const pause = this.makeButton('暂停', '暂停自动发送');
+      const clear = this.makeButton('清空', '清空待发送消息');
+      const close = this.makeButton('×', '关闭发送队列');
+      pause.addEventListener('click', () => this.runtime.messageQueue?.togglePause?.());
+      clear.addEventListener('click', () => {
+        const count = this.runtime.messageQueue?.snapshot?.().items?.length || 0;
+        if (!count || window.confirm(`清空 ${count} 条待发送消息？`)) this.runtime.messageQueue?.clear?.();
+      });
+      close.addEventListener('click', () => this.close());
+      headerActions.append(pause, clear, close);
+      header.append(title, headerActions);
+
+      const list = document.createElement('div');
+      list.className = 'cgpt-queue-list';
+
+      const compose = document.createElement('div');
+      compose.className = 'cgpt-queue-compose';
+      const input = document.createElement('textarea');
+      input.rows = 1;
+      input.placeholder = '输入待发送消息，Enter 入队';
+      input.setAttribute('aria-label', '发送队列输入框');
+      const enqueue = document.createElement('button');
+      enqueue.type = 'button';
+      enqueue.className = 'cgpt-queue-enqueue';
+      enqueue.textContent = '↑';
+      enqueue.title = '加入发送队列';
+      enqueue.disabled = true;
+      input.addEventListener('input', () => { enqueue.disabled = !input.value.trim(); });
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+          event.stopPropagation();
+          this.close();
+          return;
+        }
+        if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return;
+        event.preventDefault();
+        this.enqueueInput();
+      });
+      enqueue.addEventListener('click', () => this.enqueueInput());
+      compose.append(input, enqueue);
+
+      const footer = document.createElement('div');
+      footer.className = 'cgpt-queue-footer';
+      const dot = document.createElement('span');
+      dot.className = 'cgpt-queue-dot';
+      const status = document.createElement('span');
+      status.textContent = '等待消息';
+      footer.append(dot, status);
+
+      panel.append(header, list, compose, footer);
+      root.append(capsule, panel);
+      document.body.appendChild(root);
+
+      this.root = root;
+      this.capsule = capsule;
+      this.capsuleLabel = capsuleLabel;
+      this.capsuleBadge = badge;
+      this.panel = panel;
+      this.countLabel = title;
+      this.pauseButton = pause;
+      this.clearButton = clear;
+      this.list = list;
+      this.input = input;
+      this.enqueueButton = enqueue;
+      this.status = status;
+      this.statusDot = dot;
+      this.capsule.hidden = this.isOpen;
+      this.panel.hidden = !this.isOpen;
+      return true;
+    }
+
+    makeButton(text, title) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'cgpt-queue-icon-btn';
+      button.textContent = text;
+      button.title = title;
+      return button;
+    }
+
+    enqueueInput() {
+      const content = String(this.input?.value || '').trim();
+      if (!content) return;
+      const item = this.runtime.messageQueue?.enqueue?.(content, { source: 'composer-dock' });
+      if (!item) return;
+      this.input.value = '';
+      if (this.enqueueButton) this.enqueueButton.disabled = true;
+      this.input.focus({ preventScroll: true });
+      this.render();
+    }
+
+    open() {
+      if (!this.ensureRoot()) return;
+      this.isOpen = true;
+      this.capsule.hidden = true;
+      this.panel.hidden = false;
+      this.render();
+      this.schedulePosition();
+      window.setTimeout(() => this.input?.focus({ preventScroll: true }), 0);
+    }
+
+    close() {
+      if (!this.root) return;
+      this.isOpen = false;
+      this.panel.hidden = true;
+      this.capsule.hidden = false;
+      this.schedulePosition();
+    }
+
+    render() {
+      if (!this.ensureRoot()) return;
+      const queue = this.runtime.messageQueue;
+      const snapshot = queue?.snapshot?.() || { items: [], isPaused: false };
+      const items = snapshot.items || [];
+      const count = items.length;
+      this.capsuleLabel.textContent = count ? '队列' : '发送队列';
+      this.capsuleBadge.textContent = String(count);
+      this.capsuleBadge.hidden = count === 0;
+      this.countLabel.textContent = `发送队列 · ${count}`;
+      this.pauseButton.textContent = snapshot.isPaused ? '继续' : '暂停';
+      this.pauseButton.title = snapshot.isPaused ? '继续自动发送' : '暂停自动发送';
+      this.clearButton.disabled = count === 0;
+
+      const fragment = document.createDocumentFragment();
+      if (!count) {
+        const empty = document.createElement('div');
+        empty.className = 'cgpt-queue-empty';
+        empty.textContent = snapshot.isPaused ? '队列为空，当前已暂停' : '队列为空';
+        fragment.appendChild(empty);
+      }
+      const labels = { pending: '等待', sending: '发送中', failed: '失败' };
+      items.forEach((item, index) => {
+        const row = document.createElement('div');
+        row.className = 'cgpt-queue-row';
+        row.dataset.status = item.status || 'pending';
+        const idx = document.createElement('span');
+        idx.className = 'cgpt-queue-index';
+        idx.textContent = String(index + 1);
+        const main = document.createElement('div');
+        main.className = 'cgpt-queue-main';
+        const text = document.createElement('div');
+        text.className = 'cgpt-queue-text';
+        text.textContent = String(item.content || '').replace(/\s+/g, ' ').trim();
+        text.title = String(item.content || '');
+        const itemStatus = document.createElement('div');
+        itemStatus.className = 'cgpt-queue-item-status';
+        itemStatus.textContent = item.status === 'pending' && queue?.isItemOnCurrentConversation?.(item) === false
+          ? '等待原会话'
+          : labels[item.status] || item.status || '等待';
+        main.append(text, itemStatus);
+        const actions = document.createElement('div');
+        actions.className = 'cgpt-queue-row-actions';
+        if (item.status === 'failed') {
+          const retry = document.createElement('button');
+          retry.type = 'button';
+          retry.textContent = '↻';
+          retry.title = '重试';
+          retry.addEventListener('click', () => queue?.retry?.(item.id));
+          actions.appendChild(retry);
+        }
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.textContent = '×';
+        remove.title = '移出队列';
+        remove.addEventListener('click', () => queue?.remove?.(item.id));
+        actions.appendChild(remove);
+        row.append(idx, main, actions);
+        fragment.appendChild(row);
+      });
+      this.list.replaceChildren(fragment);
+
+      const generating = Boolean(this.runtime.isGenerating?.());
+      this.statusDot.dataset.state = snapshot.isPaused ? 'paused' : generating ? 'busy' : 'idle';
+      if (snapshot.isPaused) this.status.textContent = '已暂停自动发送';
+      else if (generating) this.status.textContent = count ? '等待当前回答完成后继续' : '当前正在生成回答';
+      else if (count) this.status.textContent = '检测到空闲后自动发送下一条';
+      else this.status.textContent = '等待消息';
+    }
+
+    resolveComposerShell(composer) {
+      if (!(composer instanceof Element)) return null;
+      const sendButton = this.runtime.promptLibrary?.findSendButton?.(composer) || null;
+      const composerRect = composer.getBoundingClientRect();
+      let node = composer.parentElement;
+      let firstCommon = null;
+      let roundedCommon = null;
+      for (let depth = 0; node && node !== document.body && depth < 12; depth += 1, node = node.parentElement) {
+        const rect = node.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) continue;
+        if (sendButton && !node.contains(sendButton)) continue;
+        if (!firstCommon) firstCommon = node;
+        const radius = Number.parseFloat(getComputedStyle(node).borderRadius || '0') || 0;
+        const coversComposer = rect.width >= composerRect.width * 0.9 && rect.height >= composerRect.height;
+        if (coversComposer && radius >= 12) {
+          roundedCommon = node;
+          break;
+        }
+        if (node.matches('form[data-type*="composer" i], form[class*="composer" i], [data-testid*="composer" i]')) {
+          roundedCommon = node;
+          break;
+        }
+      }
+      if (roundedCommon) return roundedCommon;
+      if (firstCommon) return firstCommon;
+      return composer.closest('form') || composer.parentElement || composer;
+    }
+
+    observeShell(shell) {
+      if (this.observedShell === shell) return;
+      this.resizeObserver?.disconnect?.();
+      this.resizeObserver = null;
+      this.observedShell = shell;
+      if (!(shell instanceof Element) || typeof ResizeObserver !== 'function') return;
+      this.resizeObserver = new ResizeObserver(() => this.schedulePosition());
+      this.resizeObserver.observe(shell);
+    }
+
+    schedulePosition() {
+      if (this.positionRaf) return;
+      this.positionRaf = window.requestAnimationFrame(() => {
+        this.positionRaf = 0;
+        this.refreshPosition();
+      });
+    }
+
+    refreshPosition() {
+      if (!this.ensureRoot()) return;
+      const composer = this.runtime.promptLibrary?.findComposer?.();
+      if (!composer) {
+        this.root.hidden = true;
+        return;
+      }
+      const shell = this.resolveComposerShell(composer);
+      if (!(shell instanceof Element) || !shell.isConnected) {
+        this.root.hidden = true;
+        return;
+      }
+      const rect = shell.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0 || rect.bottom < 0 || rect.top > window.innerHeight) {
+        this.root.hidden = true;
+        return;
+      }
+      this.observeShell(shell);
+      this.root.hidden = false;
+
+      const viewportWidth = Math.max(320, window.innerWidth || document.documentElement.clientWidth || 320);
+      const viewportHeight = Math.max(320, window.innerHeight || document.documentElement.clientHeight || 320);
+      const edge = 10;
+      const right = Math.max(edge, viewportWidth - Math.min(viewportWidth - edge, rect.right) + 10);
+      const bottom = Math.max(edge, viewportHeight - Math.max(edge, rect.top) + 6);
+      this.capsule.style.right = `${right}px`;
+      this.capsule.style.bottom = `${bottom}px`;
+
+      const panelWidth = Math.min(420, viewportWidth - edge * 2);
+      const maxRight = Math.max(edge, viewportWidth - panelWidth - edge);
+      this.panel.style.width = `${panelWidth}px`;
+      this.panel.style.right = `${Math.min(Math.max(edge, right), maxRight)}px`;
+      this.panel.style.bottom = `${bottom}px`;
+      this.panel.style.maxHeight = `${Math.max(180, Math.min(440, rect.top - 18))}px`;
+    }
+  }
+
+
   runtime.sessionExporter = new SessionExporter();
   runtime.promptLibrary = runtime.promptLibrary || new PromptLibrary();
+  runtime.messageQueue = runtime.messageQueue || new MessageQueue(runtime);
+  runtime.messageQueue.start();
+  runtime.composerQueueDock = runtime.composerQueueDock || new ComposerQueueDock(runtime);
+  runtime.composerQueueDock.start();
 })();
 
 /* ===== Module 1: long-chat performance + adaptive navigation ===== */
@@ -7608,6 +8522,9 @@
     textRenderingMode: 'optimizeLegibility',
     enableResidualLatex: true,
     enableKatexLetterFont: true,
+    enableFormulaCopy: true,
+    formulaCopyDelimiters: true,
+    formulaCopyBorderColor: '#6d5dfc',
   };
 
   const settingTypes = {
@@ -7634,6 +8551,9 @@
     textRenderingMode: 'select',
     enableResidualLatex: 'boolean',
     enableKatexLetterFont: 'boolean',
+    enableFormulaCopy: 'boolean',
+    formulaCopyDelimiters: 'boolean',
+    formulaCopyBorderColor: 'color',
   };
 
   const numberLimits = {
@@ -7722,6 +8642,7 @@
   let observersStarted = false;
   let residualLatexObserverStarted = false;
   let residualLatexTimer = 0;
+  let formulaCopyInitialized = false;
   let detectedFontFamilies = [];
   const detectedFontAliases = new Map();
   const detectedFontLabels = new Map();
@@ -7918,12 +8839,14 @@
     root.style.setProperty('--cgfc-font-smoothing', normalizeSetting('fontSmoothingMode', settings.fontSmoothingMode));
     root.style.setProperty('--cgfc-moz-font-smoothing', getMozFontSmoothing(settings.fontSmoothingMode));
     root.style.setProperty('--cgfc-text-rendering', normalizeSetting('textRenderingMode', settings.textRenderingMode));
+    root.style.setProperty('--cgfc-formula-copy-border-color', normalizeSetting('formulaCopyBorderColor', settings.formulaCopyBorderColor));
     root.dataset.cgfcMathMode = normalizeSetting('mathFontMode', settings.mathFontMode);
 
     root.toggleAttribute('data-cgfc-scroll-fix', settings.fixOuterScroll && hasInternalScrollContainer());
     root.toggleAttribute('data-cgfc-wrap-code', settings.wrapCode);
     root.toggleAttribute('data-cgfc-font-smoothing', settings.enableFontSmoothing);
     root.toggleAttribute('data-cgfc-katex-letter-font', settings.enableKatexLetterFont);
+    root.toggleAttribute('data-cgfc-formula-copy', settings.enableFormulaCopy);
     return true;
   }
 
@@ -8278,6 +9201,15 @@
           return original.call(this, options);
         }
       });
+    }
+
+    // Share the same generation detector and pre-submit scroll guard with the
+    // message queue. Programmatic button.click() does not emit pointerdown, so the
+    // queue explicitly arms this guard before requesting submission.
+    const coordinatorRuntime = globalThis.__cgptUnifiedRuntimeV1;
+    if (coordinatorRuntime) {
+      coordinatorRuntime.isGenerating = isGenerating;
+      coordinatorRuntime.armSendGuard = armSendGuard;
     }
 
     // Arm before ChatGPT's own handlers run. `submit` is the semantic path;
@@ -9061,6 +9993,14 @@
     residualHint.textContent = '仅处理助手消息里仍显示为纯文本的 $...$、\\(...\\)、$$...$$、\\[...\\]；不会扫描你的提问或输入框。';
     panel.appendChild(residualHint);
 
+    appendControl(panel, { label: '双击公式复制 LaTeX', key: 'enableFormulaCopy', type: 'checkbox' });
+    appendControl(panel, { label: '复制公式时保留 $ / $$ 定界符', key: 'formulaCopyDelimiters', type: 'checkbox' });
+    appendControl(panel, { label: '公式复制边框颜色', key: 'formulaCopyBorderColor', type: 'color' });
+    const formulaCopyHint = document.createElement('p');
+    formulaCopyHint.className = 'cgfc-hint';
+    formulaCopyHint.textContent = '参考 Ophel Atlas：优先读取 KaTeX 内置的 application/x-tex 原始源码；行内公式复制为 $...$，块公式复制为 $$...$$。';
+    panel.appendChild(formulaCopyHint);
+
     appendControl(panel, { label: '代码字体', key: 'codeFont', type: 'font-select' });
 
     let row = createRow(panel);
@@ -9553,6 +10493,7 @@
       holder.className = RESIDUAL_WRAPPER_CLASS;
       holder.dataset.cgfcResidualLatex = 'true';
       holder.dataset.cgfcResidualDisplay = token.display ? 'true' : 'false';
+      holder.dataset.cgfcLatex = token.content;
       holder.setAttribute('aria-label', token.raw);
       holder.title = token.raw;
       renderer.render(token.content, holder, {
@@ -9680,6 +10621,154 @@
     });
   }
 
+  function unwrapFormulaDelimiters(value) {
+    const text = String(value || '').trim();
+    if (!text) return '';
+    const pairs = [['$$', '$$'], ['\\(', '\\)'], ['\\[', '\\]'], ['$', '$']];
+    for (const [open, close] of pairs) {
+      if (text.startsWith(open) && text.endsWith(close) && text.length > open.length + close.length) {
+        return text.slice(open.length, text.length - close.length).trim();
+      }
+    }
+    return text;
+  }
+
+  function extractFormulaCopyPayload(target) {
+    const element = target instanceof Element ? target : target?.parentElement;
+    if (!element) return null;
+    if (element.closest(`#${PANEL_ID}, #${TOGGLE_ID}, textarea, input, [contenteditable="true"]`)) return null;
+
+    const host = element.closest([
+      `.${RESIDUAL_WRAPPER_CLASS}`,
+      '.math-block',
+      '.math-inline',
+      '.katex-display',
+      '.katex',
+      'math',
+      '[data-latex]',
+      '[data-math]',
+      '[data-math-source]',
+      '[data-custom-copy-text]',
+      'annotation[encoding="application/x-tex"]',
+    ].join(', '));
+    if (!host) return null;
+
+    const residual = host.closest(`.${RESIDUAL_WRAPPER_CLASS}`) || element.closest(`.${RESIDUAL_WRAPPER_CLASS}`);
+    if (residual?.dataset.cgfcLatex) {
+      return {
+        latex: unwrapFormulaDelimiters(residual.dataset.cgfcLatex),
+        isBlock: residual.dataset.cgfcResidualDisplay === 'true',
+      };
+    }
+
+    const dataHost = host.closest('[data-latex], [data-math], [data-math-source], [data-custom-copy-text]');
+    if (dataHost) {
+      const raw = dataHost.getAttribute('data-latex')
+        || dataHost.getAttribute('data-math')
+        || dataHost.getAttribute('data-math-source')
+        || dataHost.getAttribute('data-custom-copy-text')
+        || dataHost.getAttribute('copy-text')
+        || '';
+      const latex = unwrapFormulaDelimiters(raw);
+      if (latex) {
+        return {
+          latex,
+          isBlock: dataHost.classList.contains('math-block') || Boolean(dataHost.querySelector('.katex-display')),
+        };
+      }
+    }
+
+    const katexDisplay = host.matches('.katex-display') ? host : host.closest('.katex-display');
+    const katex = host.matches('.katex') ? host : host.querySelector?.('.katex') || host.closest('.katex');
+    const math = host.matches('math') ? host : host.querySelector?.('math') || katex?.querySelector?.('math') || host.closest('math');
+    const annotation = host.matches('annotation[encoding="application/x-tex"]')
+      ? host
+      : katex?.querySelector?.('annotation[encoding="application/x-tex"]')
+        || math?.querySelector?.('annotation[encoding="application/x-tex"]')
+        || host.querySelector?.('annotation[encoding="application/x-tex"]');
+    const latex = unwrapFormulaDelimiters(annotation?.textContent || '');
+    if (!latex) return null;
+    return {
+      latex,
+      isBlock: Boolean(katexDisplay || katex?.closest('.katex-display') || math?.getAttribute?.('display') === 'block'),
+    };
+  }
+
+  function formatFormulaCopy(payload) {
+    const latex = String(payload?.latex || '').replace(/\r\n?/g, '\n').trim();
+    if (!latex) return '';
+    if (!settings.formulaCopyDelimiters) return latex;
+    if (!payload.isBlock) return `$${latex}$`;
+    const needsMultiline = latex.includes('\n') || /(^|[^\\])\\\\($|[^\\])/.test(latex);
+    return needsMultiline ? `$$\n${latex}\n$$` : `$$${latex}$$`;
+  }
+
+  async function writeClipboardText(text) {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch {}
+    try {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', '');
+      Object.assign(textarea.style, {
+        position: 'fixed',
+        left: '-9999px',
+        top: '0',
+        opacity: '0',
+      });
+      document.body.appendChild(textarea);
+      textarea.select();
+      const ok = document.execCommand('copy');
+      textarea.remove();
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+
+  function showFormulaCopyToast(message) {
+    const id = 'cgfc-formula-copy-toast';
+    document.getElementById(id)?.remove();
+    const toast = document.createElement('div');
+    toast.id = id;
+    toast.textContent = message;
+    Object.assign(toast.style, {
+      position: 'fixed',
+      left: '50%',
+      bottom: '28px',
+      zIndex: '2147483647',
+      transform: 'translateX(-50%)',
+      padding: '7px 11px',
+      borderRadius: '8px',
+      background: 'rgba(28, 28, 31, .94)',
+      color: '#fff',
+      boxShadow: '0 4px 16px rgba(0,0,0,.22)',
+      font: '12px/1.35 system-ui, "Microsoft YaHei", sans-serif',
+      pointerEvents: 'none',
+    });
+    document.body?.appendChild(toast);
+    setTimeout(() => toast.remove(), 1500);
+  }
+
+  function startFormulaCopy() {
+    if (formulaCopyInitialized) return;
+    formulaCopyInitialized = true;
+    document.addEventListener('dblclick', async (event) => {
+      if (!settings.enableFormulaCopy) return;
+      const payload = extractFormulaCopyPayload(event.target);
+      if (!payload?.latex) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const text = formatFormulaCopy(payload);
+      const ok = text ? await writeClipboardText(text) : false;
+      showFormulaCopyToast(ok ? '已复制公式 LaTeX' : '公式复制失败');
+    }, true);
+  }
+
   function onReady(callback) {
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', callback, { once: true });
@@ -9706,6 +10795,7 @@
       --cgfc-font-smoothing: ${defaults.fontSmoothingMode};
       --cgfc-moz-font-smoothing: grayscale;
       --cgfc-text-rendering: ${defaults.textRenderingMode};
+      --cgfc-formula-copy-border-color: ${defaults.formulaCopyBorderColor};
     }
 
     html[data-cgfc-scroll-fix],
@@ -9734,6 +10824,19 @@
       -webkit-font-smoothing: var(--cgfc-font-smoothing) !important;
       -moz-osx-font-smoothing: var(--cgfc-moz-font-smoothing) !important;
       text-rendering: var(--cgfc-text-rendering) !important;
+    }
+
+    html[data-cgfc-formula-copy] :is(.katex, .cgfc-residual-latex) {
+      cursor: copy;
+    }
+
+    html[data-cgfc-formula-copy] :is(.katex, .cgfc-residual-latex):hover {
+      border-radius: 4px;
+      box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--cgfc-formula-copy-border-color) 70%, transparent);
+    }
+
+    html[data-cgfc-formula-copy] .cgfc-residual-latex:hover .katex {
+      box-shadow: none;
     }
 
     main [data-message-author-role],
@@ -10006,6 +11109,7 @@
   installAutoScrollLock();
   applySettings();
   startResidualLatexObserver();
+  startFormulaCopy();
   onReady(() => {
     ensureShell();
 
