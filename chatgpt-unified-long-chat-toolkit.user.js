@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT 长对话统一工具箱（性能·导航·提示词·导出·排版）
 // @namespace    local.codex.chatgpt.unified
-// @version      1.4.3
-// @description  合并长对话性能优化、可恢复 DOM 卸载、API 优先完整会话导出与问答目录、提示词库与安全发送队列、LaTeX 公式复制、经典紧凑 UI、字体与滚动修复；v1.4.3 移除提示词模块中的发送队列区块与入队按钮，只保留输入框右上角的发送队列入口；同时保留公式复制边框颜色可调。
+// @version      1.4.4
+// @description  合并长对话性能优化、可恢复 DOM 卸载、API 优先完整会话导出与问答目录、提示词库与安全发送队列、LaTeX 公式复制、经典紧凑 UI、字体与滚动修复；v1.4.4 修复窄屏/手机浮窗可见性与可视视口定位，并加入浮窗和发送队列的独立外观设置。
 // @author       Codex；含 Alex S Hamilton 的 ChatGPT Lazy Chat++（GPL-3.0-or-later）
 // @homepageURL  https://github.com/zjc1772665101-source/chatgpt-unified-long-chat-toolkit
 // @supportURL   https://github.com/zjc1772665101-source/chatgpt-unified-long-chat-toolkit/issues
@@ -33,7 +33,7 @@
   const PROMPT_STORAGE_KEY = 'cgpt-unified-prompt-library-v1';
   const runtime = globalThis[RUNTIME_KEY] || (globalThis[RUNTIME_KEY] = {});
 
-  runtime.version = '1.4.3';
+  runtime.version = '1.4.4';
   runtime.lazy = runtime.lazy || null;
   runtime.navigationLeaseTimer = 0;
   runtime.beginNavigationLease = (duration = 3200) => {
@@ -1845,6 +1845,10 @@
       this.heartbeat = 0;
       this.started = false;
       this.onViewportChange = () => this.schedulePosition();
+      this.onUiSettingsChange = () => {
+        this.render();
+        this.schedulePosition();
+      };
       this.onDocumentPointerDown = (event) => {
         if (!this.isOpen || !this.root || this.root.contains(event.target)) return;
         this.close();
@@ -1861,6 +1865,9 @@
       }) || null;
       window.addEventListener('resize', this.onViewportChange, { passive: true });
       window.addEventListener('scroll', this.onViewportChange, { capture: true, passive: true });
+      window.visualViewport?.addEventListener('resize', this.onViewportChange, { passive: true });
+      window.visualViewport?.addEventListener('scroll', this.onViewportChange, { passive: true });
+      document.addEventListener('cgpt-unified-ui-settings-change', this.onUiSettingsChange);
       document.addEventListener('pointerdown', this.onDocumentPointerDown, true);
       const observe = () => {
         if (this.observer || !document.documentElement) return;
@@ -1884,43 +1891,43 @@
         #cgpt-unified-queue-dock { position: static; width: 0; height: 0; }
         #cgpt-unified-queue-dock[hidden] { display: none !important; }
         .cgpt-queue-capsule,
-        .cgpt-queue-panel { position: fixed; z-index: 2147482500; font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; }
-        .cgpt-queue-capsule { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 5px 10px; border: 1px solid color-mix(in srgb, currentColor 14%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--main-surface-primary, #fff) 92%, transparent); color: var(--text-secondary, #555); box-shadow: 0 4px 16px rgba(0,0,0,.10); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); cursor: pointer; font-size: 12px; font-weight: 600; line-height: 1; user-select: none; transition: transform 120ms ease, box-shadow 120ms ease, background 120ms ease; }
-        .cgpt-queue-capsule:hover { transform: translateY(-1px); background: var(--main-surface-primary, #fff); color: var(--text-primary, #161616); box-shadow: 0 7px 20px rgba(0,0,0,.13); }
+        .cgpt-queue-panel { position: fixed; z-index: 2147482500; font-family: var(--cgfc-queue-font, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif); }
+        .cgpt-queue-capsule { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 5px 10px; border: 1px solid color-mix(in srgb, currentColor 14%, transparent); border-radius: 999px; background: var(--cgfc-queue-panel-background, color-mix(in srgb, var(--main-surface-primary, #fff) 92%, transparent)); color: var(--cgfc-queue-text-color, var(--text-secondary, #555)); box-shadow: 0 4px 16px rgba(0,0,0,.10); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); cursor: pointer; font-size: var(--cgfc-queue-font-size, 12px); font-weight: 600; line-height: var(--cgfc-queue-line-height, 1.4); user-select: none; transition: transform 120ms ease, box-shadow 120ms ease, background 120ms ease; }
+        .cgpt-queue-capsule:hover { transform: translateY(-1px); background: var(--cgfc-queue-panel-background, var(--main-surface-primary, #fff)); color: var(--cgfc-queue-text-color, var(--text-primary, #161616)); box-shadow: 0 7px 20px rgba(0,0,0,.13); }
         .cgpt-queue-capsule svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-        .cgpt-queue-capsule-badge { display: inline-flex; min-width: 17px; height: 17px; padding: 0 5px; align-items: center; justify-content: center; border-radius: 999px; background: #6d5dfc; color: #fff; font-size: 10px; font-weight: 700; }
+        .cgpt-queue-capsule-badge { display: inline-flex; min-width: 17px; height: 17px; padding: 0 5px; align-items: center; justify-content: center; border-radius: 999px; background: var(--cgfc-queue-accent-color, #6d5dfc); color: #fff; font-size: .833em; font-weight: 700; }
         .cgpt-queue-capsule-badge[hidden] { display: none !important; }
-        .cgpt-queue-panel { display: flex; width: 420px; max-width: calc(100vw - 24px); flex-direction: column; overflow: hidden; border: 1px solid var(--border-light, rgba(0,0,0,.14)); border-radius: 14px; background: var(--main-surface-primary, var(--bg-primary, #fff)); color: var(--text-primary, #161616); box-shadow: 0 18px 48px rgba(0,0,0,.18), 0 3px 12px rgba(0,0,0,.08); }
+        .cgpt-queue-panel { display: flex; width: var(--cgfc-queue-panel-width, 420px); max-width: calc(100vw - 20px); flex-direction: column; overflow: hidden; border: 1px solid var(--border-light, rgba(0,0,0,.14)); border-radius: 14px; background: var(--cgfc-queue-panel-background, var(--main-surface-primary, var(--bg-primary, #fff))); color: var(--cgfc-queue-text-color, var(--text-primary, #161616)); box-shadow: 0 18px 48px rgba(0,0,0,.18), 0 3px 12px rgba(0,0,0,.08); font-size: var(--cgfc-queue-font-size, 12px); line-height: var(--cgfc-queue-line-height, 1.4); }
         .cgpt-queue-panel[hidden] { display: none !important; }
         .cgpt-queue-panel-header { display: flex; min-height: 45px; padding: 8px 10px 8px 12px; align-items: center; gap: 8px; border-bottom: 1px solid var(--border-light, rgba(0,0,0,.1)); }
-        .cgpt-queue-panel-title { margin-right: auto; font-size: 13px; font-weight: 700; }
+        .cgpt-queue-panel-title { margin-right: auto; font-size: 1.083em; font-weight: 700; }
         .cgpt-queue-panel-actions { display: flex; gap: 3px; }
-        .cgpt-queue-icon-btn { display: inline-grid; min-width: 29px; height: 29px; padding: 0 7px; place-items: center; border: 0; border-radius: 8px; background: transparent; color: var(--text-secondary, #666); cursor: pointer; font: inherit; font-size: 11px; }
+        .cgpt-queue-icon-btn { display: inline-grid; min-width: 29px; height: 29px; padding: 0 7px; place-items: center; border: 0; border-radius: 8px; background: transparent; color: var(--cgfc-queue-text-color, var(--text-secondary, #666)); cursor: pointer; font: inherit; font-size: .917em; }
         .cgpt-queue-icon-btn:hover { background: var(--main-surface-secondary, var(--bg-secondary, #eee)); color: var(--text-primary, #161616); }
         .cgpt-queue-list { min-height: 38px; max-height: 190px; overflow-y: auto; padding: 8px; scrollbar-width: thin; }
-        .cgpt-queue-empty { padding: 12px 8px; color: var(--text-tertiary, #888); font-size: 12px; text-align: center; }
+        .cgpt-queue-empty { padding: 12px 8px; color: var(--cgfc-queue-muted-color, var(--text-tertiary, #888)); font-size: 1em; text-align: center; }
         .cgpt-queue-row { display: grid; grid-template-columns: 23px minmax(0, 1fr) auto; gap: 7px; align-items: center; margin-bottom: 5px; padding: 7px; border-radius: 9px; background: color-mix(in srgb, var(--main-surface-secondary, #eee) 48%, transparent); }
-        .cgpt-queue-row[data-status="sending"] { outline: 1px solid color-mix(in srgb, #6d5dfc 42%, transparent); }
+        .cgpt-queue-row[data-status="sending"] { outline: 1px solid color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 42%, transparent); }
         .cgpt-queue-row[data-status="failed"] { outline: 1px solid color-mix(in srgb, #dc2626 40%, transparent); }
-        .cgpt-queue-index { display: grid; width: 22px; height: 22px; place-items: center; border-radius: 7px; background: var(--main-surface-primary, #fff); color: var(--text-secondary, #666); font-size: 10px; font-weight: 700; }
+        .cgpt-queue-index { display: grid; width: 22px; height: 22px; place-items: center; border-radius: 7px; background: var(--main-surface-primary, #fff); color: var(--cgfc-queue-muted-color, var(--text-secondary, #666)); font-size: .833em; font-weight: 700; }
         .cgpt-queue-main { min-width: 0; }
-        .cgpt-queue-text { overflow: hidden; color: var(--text-primary, #161616); font-size: 12px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
-        .cgpt-queue-item-status { margin-top: 2px; color: var(--text-tertiary, #888); font-size: 10px; }
+        .cgpt-queue-text { overflow: hidden; color: var(--cgfc-queue-text-color, var(--text-primary, #161616)); font-size: 1em; line-height: inherit; text-overflow: ellipsis; white-space: nowrap; }
+        .cgpt-queue-item-status { margin-top: 2px; color: var(--cgfc-queue-muted-color, var(--text-tertiary, #888)); font-size: .833em; }
         .cgpt-queue-row-actions { display: flex; gap: 2px; }
         .cgpt-queue-row-actions button { width: 25px; height: 25px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--text-tertiary, #777); cursor: pointer; }
         .cgpt-queue-row-actions button:hover { background: var(--main-surface-primary, #fff); color: var(--text-primary, #161616); }
         .cgpt-queue-compose { display: flex; gap: 7px; padding: 9px 10px; align-items: flex-end; border-top: 1px solid var(--border-light, rgba(0,0,0,.1)); }
-        .cgpt-queue-compose textarea { min-width: 0; min-height: 38px; max-height: 112px; flex: 1; padding: 8px 10px; resize: vertical; border: 1px solid var(--border-light, rgba(0,0,0,.15)); border-radius: 9px; background: var(--main-surface-primary, #fff); color: var(--text-primary, #161616); font: inherit; font-size: 12px; line-height: 1.4; outline: none; }
-        .cgpt-queue-compose textarea:focus { border-color: color-mix(in srgb, #6d5dfc 60%, var(--border-light, rgba(0,0,0,.15))); box-shadow: 0 0 0 3px color-mix(in srgb, #6d5dfc 12%, transparent); }
-        .cgpt-queue-enqueue { width: 38px; height: 38px; flex: none; border: 0; border-radius: 9px; background: #6d5dfc; color: #fff; cursor: pointer; font-size: 17px; line-height: 1; }
+        .cgpt-queue-compose textarea { min-width: 0; min-height: 38px; max-height: 112px; flex: 1; padding: 8px 10px; resize: vertical; border: 1px solid var(--border-light, rgba(0,0,0,.15)); border-radius: 9px; background: var(--main-surface-primary, #fff); color: var(--cgfc-queue-text-color, var(--text-primary, #161616)); font: inherit; font-size: 1em; line-height: inherit; outline: none; }
+        .cgpt-queue-compose textarea:focus { border-color: color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 60%, var(--border-light, rgba(0,0,0,.15))); box-shadow: 0 0 0 3px color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 12%, transparent); }
+        .cgpt-queue-enqueue { width: 38px; height: 38px; flex: none; border: 0; border-radius: 9px; background: var(--cgfc-queue-accent-color, #6d5dfc); color: #fff; cursor: pointer; font-size: 17px; line-height: 1; }
         .cgpt-queue-enqueue:disabled { opacity: .45; cursor: default; }
-        .cgpt-queue-footer { display: flex; min-height: 26px; padding: 0 11px 8px; align-items: center; gap: 6px; color: var(--text-tertiary, #888); font-size: 10px; }
+        .cgpt-queue-footer { display: flex; min-height: 26px; padding: 0 11px 8px; align-items: center; gap: 6px; color: var(--cgfc-queue-muted-color, var(--text-tertiary, #888)); font-size: .833em; }
         .cgpt-queue-dot { width: 6px; height: 6px; border-radius: 50%; background: #22c55e; }
         .cgpt-queue-dot[data-state="paused"] { background: #f59e0b; }
-        .cgpt-queue-dot[data-state="busy"] { background: #6d5dfc; }
+        .cgpt-queue-dot[data-state="busy"] { background: var(--cgfc-queue-accent-color, #6d5dfc); }
         @media (max-width: 640px) {
-          .cgpt-queue-capsule { min-height: 28px; padding: 4px 8px; font-size: 11px; }
-          .cgpt-queue-panel { width: calc(100vw - 20px); }
+          .cgpt-queue-capsule { min-height: 32px; padding: 5px 9px; }
+          .cgpt-queue-panel { width: calc(100vw - 20px); max-height: calc(100dvh - 20px); }
         }
         @media (prefers-reduced-motion: reduce) {
           .cgpt-queue-capsule { transition: none; }
@@ -2211,20 +2218,41 @@
       this.observeShell(shell);
       this.root.hidden = false;
 
-      const viewportWidth = Math.max(320, window.innerWidth || document.documentElement.clientWidth || 320);
-      const viewportHeight = Math.max(320, window.innerHeight || document.documentElement.clientHeight || 320);
+      const visualViewport = window.visualViewport;
+      const viewportLeft = Math.max(0, visualViewport?.offsetLeft || 0);
+      const viewportTop = Math.max(0, visualViewport?.offsetTop || 0);
+      const viewportWidth = Math.max(240, visualViewport?.width || document.documentElement.clientWidth || window.innerWidth || 320);
+      const viewportHeight = Math.max(240, visualViewport?.height || document.documentElement.clientHeight || window.innerHeight || 320);
+      const viewportRight = viewportLeft + viewportWidth;
+      const viewportBottom = viewportTop + viewportHeight;
       const edge = 10;
-      const right = Math.max(edge, viewportWidth - Math.min(viewportWidth - edge, rect.right) + 10);
-      const bottom = Math.max(edge, viewportHeight - Math.max(edge, rect.top) + 6);
-      this.capsule.style.right = `${right}px`;
-      this.capsule.style.bottom = `${bottom}px`;
-
-      const panelWidth = Math.min(420, viewportWidth - edge * 2);
-      const maxRight = Math.max(edge, viewportWidth - panelWidth - edge);
+      const rootStyles = getComputedStyle(document.documentElement);
+      const preferredPanelWidth = Number.parseFloat(rootStyles.getPropertyValue('--cgfc-queue-panel-width')) || 420;
+      const panelWidth = Math.min(Math.max(280, preferredPanelWidth), viewportWidth - edge * 2);
       this.panel.style.width = `${panelWidth}px`;
-      this.panel.style.right = `${Math.min(Math.max(edge, right), maxRight)}px`;
-      this.panel.style.bottom = `${bottom}px`;
-      this.panel.style.maxHeight = `${Math.max(180, Math.min(440, rect.top - 18))}px`;
+      const availableAbove = Math.max(120, rect.top - viewportTop - edge - 6);
+      this.panel.style.maxHeight = `${Math.min(440, viewportHeight - edge * 2, availableAbove)}px`;
+
+      const positionAboveComposer = (element, width) => {
+        const elementRect = element.getBoundingClientRect();
+        const safeWidth = Math.max(1, width || elementRect.width || 1);
+        const safeHeight = Math.max(1, elementRect.height || 1);
+        const left = Math.min(
+          viewportRight - edge - safeWidth,
+          Math.max(viewportLeft + edge, rect.right - safeWidth - 10),
+        );
+        const top = Math.min(
+          viewportBottom - edge - safeHeight,
+          Math.max(viewportTop + edge, rect.top - safeHeight - 6),
+        );
+        element.style.removeProperty('right');
+        element.style.removeProperty('bottom');
+        element.style.left = `${left}px`;
+        element.style.top = `${top}px`;
+      };
+
+      positionAboveComposer(this.capsule, this.capsule.getBoundingClientRect().width);
+      positionAboveComposer(this.panel, panelWidth);
     }
   }
 
@@ -2294,8 +2322,8 @@
     answerTocFallbackInlineEndPx: 68,
     answerTocOfficialNavGapPx: 12,
 
-    // 窗口太窄时隐藏目录，避免覆盖主要内容。设为 0 可始终显示。
-    answerTocMinViewportWidth: 820,
+    // 始终保留入口；窄屏/手机通过下方响应式布局避开输入框和安全区。
+    answerTocMinViewportWidth: 0,
 
     // 目录条目的最大文本长度；完整标题仍会放在 title 提示中。
     answerTocMaxLabelLength: 180,
@@ -2625,6 +2653,13 @@
       this.onResizePointerMove = this.onResizePointerMove.bind(this);
       this.onResizePointerEnd = this.onResizePointerEnd.bind(this);
       this.onResizePointerCancel = this.onResizePointerCancel.bind(this);
+      this.onUiSettingsChange = () => {
+        window.requestAnimationFrame(() => {
+          this.ensurePanelSizeInViewport(false);
+          this.ensureManualPositionInViewport(true);
+          this.updateInlineEndOffset();
+        });
+      };
     }
 
     start() {
@@ -2643,12 +2678,15 @@
         passive: true,
       });
       window.addEventListener('resize', this.onResize, { passive: true });
+      window.visualViewport?.addEventListener('resize', this.onResize, { passive: true });
+      window.visualViewport?.addEventListener('scroll', this.onResize, { passive: true });
       window.addEventListener('popstate', this.onRouteSignal, { passive: true });
       window.addEventListener('hashchange', this.onRouteSignal, { passive: true });
       document.addEventListener('keydown', this.onKeyDown, true);
       document.addEventListener('pointerdown', this.onDocumentPointerDown, true);
       document.addEventListener('click', this.onDocumentClick, true);
       document.addEventListener('visibilitychange', this.onVisibilityChange);
+      document.addEventListener('cgpt-unified-ui-settings-change', this.onUiSettingsChange);
 
       if (window.navigation && typeof window.navigation.addEventListener === 'function') {
         window.navigation.addEventListener('navigatesuccess', this.onRouteSignal);
@@ -2719,11 +2757,11 @@
             height: max-content !important;
             display: block !important;
             transform: translateY(-50%) !important;
-            font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont,
-              "Segoe UI", sans-serif !important;
-            font-size: 13px !important;
-            line-height: 1.4 !important;
-            color: var(--text-primary, #161616) !important;
+            font-family: var(--cgfc-toolbox-font, ui-sans-serif, -apple-system, BlinkMacSystemFont,
+              "Segoe UI", "Microsoft YaHei", sans-serif) !important;
+            font-size: var(--cgfc-toolbox-font-size, 13px) !important;
+            line-height: var(--cgfc-toolbox-line-height, 1.4) !important;
+            color: var(--cgfc-toolbox-text-color, var(--text-primary, #161616)) !important;
             color-scheme: light dark !important;
             direction: inherit !important;
             pointer-events: none !important;
@@ -2766,13 +2804,13 @@
             padding: 0 9px;
             border: 1px solid var(--border-light, rgba(0, 0, 0, 0.14));
             border-radius: 12px;
-            background: rgba(255, 255, 255, ${launcherOpacity});
-            background: color-mix(
+            background: var(--cgfc-toolbox-launcher-background, rgba(255, 255, 255, ${launcherOpacity}));
+            background: var(--cgfc-toolbox-launcher-background, color-mix(
               in srgb,
               var(--main-surface-primary, var(--bg-primary, #ffffff)) ${launcherOpacityPercent},
               transparent
-            );
-            color: var(--text-secondary, #444444);
+            ));
+            color: var(--cgfc-toolbox-text-color, var(--text-secondary, #444444));
             box-shadow: 0 6px 22px rgba(0, 0, 0, 0.14);
             cursor: grab;
             touch-action: none;
@@ -2780,20 +2818,20 @@
           }
 
           .launcher:hover {
-            background: rgba(244, 244, 244, ${launcherOpacity});
-            background: color-mix(
+            background: var(--cgfc-toolbox-launcher-background, rgba(244, 244, 244, ${launcherOpacity}));
+            background: var(--cgfc-toolbox-launcher-background, color-mix(
               in srgb,
               var(--main-surface-secondary, var(--bg-secondary, #f4f4f4)) ${launcherOpacityPercent},
               transparent
-            );
-            color: var(--text-primary, #161616);
+            ));
+            color: var(--cgfc-toolbox-text-color, var(--text-primary, #161616));
           }
 
           .launcher:focus-visible,
           .icon-button:focus-visible,
           .view-tab:focus-visible,
           .toc-item:focus-visible {
-            outline: 2px solid var(--text-primary, #161616);
+            outline: 2px solid var(--cgfc-toolbox-accent-color, var(--text-primary, #161616));
             outline-offset: 2px;
           }
 
@@ -2806,7 +2844,7 @@
 
           .launcher-mode {
             min-width: 1em;
-            color: var(--text-tertiary, #777777);
+            color: var(--cgfc-toolbox-muted-color, var(--text-tertiary, #777777));
             font-size: 10px;
             font-weight: 600;
           }
@@ -2820,29 +2858,29 @@
 
           .panel {
             position: relative;
-            width: min(var(--cgpt-answer-toc-width, 300px), calc(100vw - 16px));
-            max-height: min(68vh, 660px, calc(100vh - 16px));
+            width: min(var(--cgpt-answer-toc-width, var(--cgfc-toolbox-panel-width, 300px)), calc(100vw - 16px));
+            max-height: min(68dvh, 660px, calc(100dvh - 16px));
             display: flex;
             flex-direction: column;
             overflow: hidden;
             border: 1px solid var(--border-light, rgba(0, 0, 0, 0.14));
             border-radius: 14px;
-            background: rgba(255, 255, 255, ${panelOpacity});
-            background: color-mix(
+            background: var(--cgfc-toolbox-panel-background, rgba(255, 255, 255, ${panelOpacity}));
+            background: var(--cgfc-toolbox-panel-background, color-mix(
               in srgb,
               var(--main-surface-primary, var(--bg-primary, #ffffff)) ${panelOpacityPercent},
               transparent
-            );
+            ));
             box-shadow: 0 10px 34px rgba(0, 0, 0, 0.16);
           }
 
           :host([data-size-mode="manual"]) .panel {
-            width: var(--cgpt-answer-toc-width, 300px);
+            width: var(--cgpt-answer-toc-width, var(--cgfc-toolbox-panel-width, 300px));
             height: var(--cgpt-answer-toc-height, 420px);
             min-width: ${minWidth}px;
             min-height: ${minHeight}px;
             max-width: calc(100vw - 16px);
-            max-height: calc(100vh - 16px);
+            max-height: calc(100dvh - 16px);
           }
 
           .panel[hidden],
@@ -2876,7 +2914,7 @@
             grid-auto-rows: 3px;
             place-content: center;
             gap: 3px;
-            color: var(--text-tertiary, #777777);
+            color: var(--cgfc-toolbox-muted-color, var(--text-tertiary, #777777));
             opacity: 0.75;
           }
 
@@ -2909,7 +2947,7 @@
 
           .panel-title {
             overflow: hidden;
-            color: var(--text-primary, #161616);
+            color: var(--cgfc-toolbox-text-color, var(--text-primary, #161616));
             font-weight: 600;
             text-overflow: ellipsis;
             white-space: nowrap;
@@ -2917,7 +2955,7 @@
 
           .count-label {
             flex: none;
-            color: var(--text-tertiary, #777777);
+            color: var(--cgfc-toolbox-muted-color, var(--text-tertiary, #777777));
             font-size: 11px;
             font-variant-numeric: tabular-nums;
           }
@@ -2935,13 +2973,13 @@
             border: 0;
             border-radius: 8px;
             background: transparent;
-            color: var(--text-secondary, #555555);
+            color: var(--cgfc-toolbox-muted-color, var(--text-secondary, #555555));
             cursor: pointer;
           }
 
           .icon-button:hover {
             background: var(--main-surface-secondary, var(--bg-secondary, #f1f1f1));
-            color: var(--text-primary, #161616);
+            color: var(--cgfc-toolbox-text-color, var(--text-primary, #161616));
           }
 
           .view-tabs {
@@ -2964,7 +3002,7 @@
             border: 0;
             border-radius: 8px;
             background: transparent;
-            color: var(--text-secondary, #4a4a4a);
+            color: var(--cgfc-toolbox-muted-color, var(--text-secondary, #4a4a4a));
             cursor: pointer;
           }
 
@@ -2974,12 +3012,12 @@
               var(--main-surface-secondary, var(--bg-secondary, #f3f3f3)) 74%,
               transparent
             );
-            color: var(--text-primary, #161616);
+            color: var(--cgfc-toolbox-text-color, var(--text-primary, #161616));
           }
 
           .view-tab[aria-selected="true"] {
-            background: var(--main-surface-secondary, var(--bg-secondary, #ededed));
-            color: var(--text-primary, #111111);
+            background: color-mix(in srgb, var(--cgfc-toolbox-accent-color, var(--main-surface-secondary, var(--bg-secondary, #ededed))) 18%, transparent);
+            color: var(--cgfc-toolbox-text-color, var(--text-primary, #111111));
             font-weight: 600;
           }
 
@@ -3029,7 +3067,7 @@
             border: 0;
             border-radius: 8px;
             background: transparent;
-            color: var(--text-secondary, #4a4a4a);
+            color: var(--cgfc-toolbox-muted-color, var(--text-secondary, #4a4a4a));
             text-align: start;
             cursor: pointer;
           }
@@ -3050,16 +3088,16 @@
               var(--main-surface-secondary, var(--bg-secondary, #f3f3f3)) 82%,
               transparent
             );
-            color: var(--text-primary, #161616);
+            color: var(--cgfc-toolbox-text-color, var(--text-primary, #161616));
           }
 
           .toc-item[data-active="true"] {
-            background: var(--main-surface-secondary, var(--bg-secondary, #ededed));
-            color: var(--text-primary, #111111);
+            background: color-mix(in srgb, var(--cgfc-toolbox-accent-color, var(--main-surface-secondary, var(--bg-secondary, #ededed))) 18%, transparent);
+            color: var(--cgfc-toolbox-text-color, var(--text-primary, #111111));
           }
 
           .toc-item[data-active="true"]::before {
-            background: var(--text-primary, #111111);
+            background: var(--cgfc-toolbox-accent-color, var(--text-primary, #111111));
           }
 
           .toc-item[data-level="1"] {
@@ -3087,7 +3125,7 @@
             width: 2.4em;
             flex: none;
             padding-top: 1px;
-            color: var(--text-tertiary, #777777);
+            color: var(--cgfc-toolbox-muted-color, var(--text-tertiary, #777777));
             font-size: 10.5px;
             font-variant-numeric: tabular-nums;
             text-align: end;
@@ -3125,7 +3163,7 @@
             padding: 18px 12px;
             border: 1px dashed var(--border-light, rgba(0, 0, 0, 0.14));
             border-radius: 10px;
-            color: var(--text-tertiary, #777777);
+            color: var(--cgfc-toolbox-muted-color, var(--text-tertiary, #777777));
             text-align: center;
             font-size: 12px;
           }
@@ -3181,29 +3219,52 @@
           @media (prefers-color-scheme: dark) {
             .launcher {
               border-color: rgba(255, 255, 255, 0.14);
-              background: rgba(33, 33, 33, ${launcherOpacity});
-              background: color-mix(
+              background: var(--cgfc-toolbox-launcher-background, rgba(33, 33, 33, ${launcherOpacity}));
+              background: var(--cgfc-toolbox-launcher-background, color-mix(
                 in srgb,
                 var(--main-surface-primary, var(--bg-primary, #212121)) ${launcherOpacityPercent},
                 transparent
-              );
+              ));
               box-shadow: 0 8px 28px rgba(0, 0, 0, 0.42);
             }
 
             .panel {
               border-color: rgba(255, 255, 255, 0.14);
-              background: rgba(33, 33, 33, ${panelOpacity});
-              background: color-mix(
+              background: var(--cgfc-toolbox-panel-background, rgba(33, 33, 33, ${panelOpacity}));
+              background: var(--cgfc-toolbox-panel-background, color-mix(
                 in srgb,
                 var(--main-surface-primary, var(--bg-primary, #212121)) ${panelOpacityPercent},
                 transparent
-              );
+              ));
               box-shadow: 0 8px 28px rgba(0, 0, 0, 0.42);
             }
 
             .panel-header,
             .view-tabs {
               border-bottom-color: rgba(255, 255, 255, 0.11);
+            }
+          }
+
+          @media (max-width: 819px) {
+            :host(:not([data-position-mode="manual"])) {
+              inset-inline-end: max(8px, env(safe-area-inset-right)) !important;
+              top: auto !important;
+              bottom: max(140px, calc(env(safe-area-inset-bottom) + 128px)) !important;
+              transform: none !important;
+            }
+
+            .launcher {
+              min-width: 44px;
+              height: 40px;
+            }
+
+            .panel {
+              width: min(var(--cgpt-answer-toc-width, var(--cgfc-toolbox-panel-width, 300px)), calc(100vw - 16px));
+              max-height: min(72dvh, calc(100dvh - 96px));
+            }
+
+            .panel-header {
+              padding-inline-end: 12px;
             }
           }
 
@@ -4015,6 +4076,7 @@
     applyCollapsedState() {
       if (!this.launcher || !this.panel) return;
 
+      if (this.host) this.host.dataset.collapsed = String(this.collapsed);
       this.launcher.hidden = !this.collapsed;
       this.panel.hidden = this.collapsed;
       this.launcher.setAttribute('aria-expanded', String(!this.collapsed));
@@ -4421,16 +4483,21 @@
         0,
         Number(this.config.answerTocDragViewportMarginPx) || 0,
       );
-      const viewportWidth = Math.max(1, document.documentElement.clientWidth);
-      const viewportHeight = Math.max(1, document.documentElement.clientHeight);
+      const visualViewport = window.visualViewport;
+      const viewportLeft = Math.max(0, visualViewport?.offsetLeft || 0);
+      const viewportTop = Math.max(0, visualViewport?.offsetTop || 0);
+      const viewportWidth = Math.max(1, visualViewport?.width || document.documentElement.clientWidth);
+      const viewportHeight = Math.max(1, visualViewport?.height || document.documentElement.clientHeight);
       const safeWidth = Math.max(1, Number(width) || 1);
       const safeHeight = Math.max(1, Number(height) || 1);
-      const maxLeft = Math.max(margin, viewportWidth - safeWidth - margin);
-      const maxTop = Math.max(margin, viewportHeight - safeHeight - margin);
+      const minLeft = viewportLeft + margin;
+      const minTop = viewportTop + margin;
+      const maxLeft = Math.max(minLeft, viewportLeft + viewportWidth - safeWidth - margin);
+      const maxTop = Math.max(minTop, viewportTop + viewportHeight - safeHeight - margin);
 
       return {
-        left: Math.min(maxLeft, Math.max(margin, left)),
-        top: Math.min(maxTop, Math.max(margin, top)),
+        left: Math.min(maxLeft, Math.max(minLeft, left)),
+        top: Math.min(maxTop, Math.max(minTop, top)),
       };
     }
 
@@ -6960,6 +7027,8 @@
         ? Math.max(0, Number(this.config.answerTocStandaloneInlineEndPx) || 20)
         : Math.max(0, Number(this.config.answerTocFallbackInlineEndPx) || 68);
 
+      if (document.documentElement.clientWidth < 820) offset = 8;
+
       if (!this.config.hideOfficialConversationToc) {
         const container = this.getOfficialNavContainer();
         if (container) {
@@ -8525,6 +8594,24 @@
     enableFormulaCopy: true,
     formulaCopyDelimiters: true,
     formulaCopyBorderColor: '#6d5dfc',
+    toolboxFont: '"Segoe UI", "Microsoft YaHei", sans-serif',
+    toolboxFontSize: 13,
+    toolboxLineHeight: 1.4,
+    toolboxPanelWidth: 300,
+    toolboxUseCustomColors: false,
+    toolboxTextColor: '#f4f4f4',
+    toolboxBackgroundColor: '#212121',
+    toolboxAccentColor: '#6d5dfc',
+    toolboxOpacity: 0.82,
+    queueFont: '"Segoe UI", "Microsoft YaHei", sans-serif',
+    queueFontSize: 12,
+    queueLineHeight: 1.4,
+    queuePanelWidth: 420,
+    queueUseCustomColors: false,
+    queueTextColor: '#f4f4f4',
+    queueBackgroundColor: '#212121',
+    queueAccentColor: '#6d5dfc',
+    queueOpacity: 0.94,
   };
 
   const settingTypes = {
@@ -8554,6 +8641,24 @@
     enableFormulaCopy: 'boolean',
     formulaCopyDelimiters: 'boolean',
     formulaCopyBorderColor: 'color',
+    toolboxFont: 'text',
+    toolboxFontSize: 'number',
+    toolboxLineHeight: 'number',
+    toolboxPanelWidth: 'number',
+    toolboxUseCustomColors: 'boolean',
+    toolboxTextColor: 'color',
+    toolboxBackgroundColor: 'color',
+    toolboxAccentColor: 'color',
+    toolboxOpacity: 'number',
+    queueFont: 'text',
+    queueFontSize: 'number',
+    queueLineHeight: 'number',
+    queuePanelWidth: 'number',
+    queueUseCustomColors: 'boolean',
+    queueTextColor: 'color',
+    queueBackgroundColor: 'color',
+    queueAccentColor: 'color',
+    queueOpacity: 'number',
   };
 
   const numberLimits = {
@@ -8562,6 +8667,14 @@
     codeFontSize: [10, 32],
     codeLineHeight: [1, 2.8],
     boldWeight: [400, 1000],
+    toolboxFontSize: [9, 24],
+    toolboxLineHeight: [1, 2.2],
+    toolboxPanelWidth: [220, 560],
+    toolboxOpacity: [0.2, 1],
+    queueFontSize: [9, 24],
+    queueLineHeight: [1, 2.2],
+    queuePanelWidth: [280, 720],
+    queueOpacity: [0.2, 1],
   };
 
   const selectValues = {
@@ -8581,6 +8694,7 @@
 
   const FONT_SETTING_KEYS = new Set([
     'latinFont', 'chineseFont', 'boldLatinFont', 'boldChineseFont', 'mathFont', 'codeFont',
+    'toolboxFont', 'queueFont',
   ]);
   const LOCAL_FONT_RESCUE_GROUPS = [
     {
@@ -8696,6 +8810,15 @@
     return /^#[0-9a-f]{6}$/i.test(text) ? text : fallback;
   }
 
+  function colorWithAlpha(value, alpha, fallback) {
+    const color = sanitizeColor(value, fallback);
+    const opacity = clamp(alpha, 0, 1, 1);
+    const red = Number.parseInt(color.slice(1, 3), 16);
+    const green = Number.parseInt(color.slice(3, 5), 16);
+    const blue = Number.parseInt(color.slice(5, 7), 16);
+    return `rgba(${red}, ${green}, ${blue}, ${opacity})`;
+  }
+
   function readStore(key, fallback) {
     try {
       if (typeof GM_getValue === 'function') return GM_getValue(key, fallback);
@@ -8745,7 +8868,7 @@
       return selectValues[key]?.includes(value) ? value : defaults[key];
     }
     if (type === 'color') return sanitizeColor(value, defaults[key]);
-    if (['latinFont', 'chineseFont', 'boldLatinFont', 'boldChineseFont', 'mathFont', 'codeFont'].includes(key)) {
+    if (['latinFont', 'chineseFont', 'boldLatinFont', 'boldChineseFont', 'mathFont', 'codeFont', 'toolboxFont', 'queueFont'].includes(key)) {
       return sanitizeFontStack(value, defaults[key]);
     }
     return String(value ?? defaults[key]);
@@ -8840,6 +8963,40 @@
     root.style.setProperty('--cgfc-moz-font-smoothing', getMozFontSmoothing(settings.fontSmoothingMode));
     root.style.setProperty('--cgfc-text-rendering', normalizeSetting('textRenderingMode', settings.textRenderingMode));
     root.style.setProperty('--cgfc-formula-copy-border-color', normalizeSetting('formulaCopyBorderColor', settings.formulaCopyBorderColor));
+    root.style.setProperty('--cgfc-toolbox-font', sanitizeFontStack(settings.toolboxFont, defaults.toolboxFont));
+    root.style.setProperty('--cgfc-toolbox-font-size', `${normalizeSetting('toolboxFontSize', settings.toolboxFontSize)}px`);
+    root.style.setProperty('--cgfc-toolbox-line-height', String(normalizeSetting('toolboxLineHeight', settings.toolboxLineHeight)));
+    root.style.setProperty('--cgfc-toolbox-panel-width', `${normalizeSetting('toolboxPanelWidth', settings.toolboxPanelWidth)}px`);
+    root.style.setProperty('--cgfc-toolbox-accent-color', normalizeSetting('toolboxAccentColor', settings.toolboxAccentColor));
+    root.style.setProperty('--cgfc-queue-font', sanitizeFontStack(settings.queueFont, defaults.queueFont));
+    root.style.setProperty('--cgfc-queue-font-size', `${normalizeSetting('queueFontSize', settings.queueFontSize)}px`);
+    root.style.setProperty('--cgfc-queue-line-height', String(normalizeSetting('queueLineHeight', settings.queueLineHeight)));
+    root.style.setProperty('--cgfc-queue-panel-width', `${normalizeSetting('queuePanelWidth', settings.queuePanelWidth)}px`);
+    root.style.setProperty('--cgfc-queue-accent-color', normalizeSetting('queueAccentColor', settings.queueAccentColor));
+
+    const applyPalette = (prefix, enabled, textColor, backgroundColor, opacity) => {
+      const properties = [
+        `--cgfc-${prefix}-text-color`,
+        `--cgfc-${prefix}-muted-color`,
+        `--cgfc-${prefix}-panel-background`,
+      ];
+      if (prefix === 'toolbox') properties.push('--cgfc-toolbox-launcher-background');
+      if (!enabled) {
+        properties.forEach((property) => root.style.removeProperty(property));
+        return;
+      }
+      const normalizedText = normalizeSetting(`${prefix}TextColor`, textColor);
+      const normalizedBackground = normalizeSetting(`${prefix}BackgroundColor`, backgroundColor);
+      const normalizedOpacity = normalizeSetting(`${prefix}Opacity`, opacity);
+      root.style.setProperty(`--cgfc-${prefix}-text-color`, normalizedText);
+      root.style.setProperty(`--cgfc-${prefix}-muted-color`, colorWithAlpha(normalizedText, 0.68, defaults[`${prefix}TextColor`]));
+      root.style.setProperty(`--cgfc-${prefix}-panel-background`, colorWithAlpha(normalizedBackground, normalizedOpacity, defaults[`${prefix}BackgroundColor`]));
+      if (prefix === 'toolbox') {
+        root.style.setProperty('--cgfc-toolbox-launcher-background', colorWithAlpha(normalizedBackground, Math.min(1, normalizedOpacity + 0.08), defaults.toolboxBackgroundColor));
+      }
+    };
+    applyPalette('toolbox', settings.toolboxUseCustomColors, settings.toolboxTextColor, settings.toolboxBackgroundColor, settings.toolboxOpacity);
+    applyPalette('queue', settings.queueUseCustomColors, settings.queueTextColor, settings.queueBackgroundColor, settings.queueOpacity);
     root.dataset.cgfcMathMode = normalizeSetting('mathFontMode', settings.mathFontMode);
 
     root.toggleAttribute('data-cgfc-scroll-fix', settings.fixOuterScroll && hasInternalScrollContainer());
@@ -8847,6 +9004,7 @@
     root.toggleAttribute('data-cgfc-font-smoothing', settings.enableFontSmoothing);
     root.toggleAttribute('data-cgfc-katex-letter-font', settings.enableKatexLetterFont);
     root.toggleAttribute('data-cgfc-formula-copy', settings.enableFormulaCopy);
+    document.dispatchEvent(new CustomEvent('cgpt-unified-ui-settings-change'));
     return true;
   }
 
@@ -9894,6 +10052,17 @@
     return row;
   }
 
+  function createSettingsGroup(parent, title, open = false) {
+    const group = document.createElement('details');
+    group.className = 'cgfc-settings-group';
+    group.open = open;
+    const summary = document.createElement('summary');
+    summary.textContent = title;
+    group.appendChild(summary);
+    parent.appendChild(group);
+    return group;
+  }
+
   function syncPanelInputs(panel) {
     panel.querySelectorAll('input[data-key], select[data-key]').forEach((input) => {
       const key = input.dataset.key;
@@ -10039,6 +10208,42 @@
         { label: '几何精度', value: 'geometricPrecision' },
       ],
     });
+
+    const toolboxGroup = createSettingsGroup(panel, '导航 / 提示词浮窗外观');
+    appendControl(toolboxGroup, { label: '浮窗字体', key: 'toolboxFont', type: 'font-select' });
+    row = createRow(toolboxGroup);
+    appendControl(row, { label: '字号 px', key: 'toolboxFontSize', type: 'number', min: 9, max: 24, step: 1 });
+    appendControl(row, { label: '行高', key: 'toolboxLineHeight', type: 'number', min: 1, max: 2.2, step: 0.05 });
+    appendControl(toolboxGroup, { label: '面板宽度 px', key: 'toolboxPanelWidth', type: 'number', min: 220, max: 560, step: 10 });
+    appendControl(toolboxGroup, { label: '启用浮窗自定义颜色', key: 'toolboxUseCustomColors', type: 'checkbox' });
+    row = createRow(toolboxGroup);
+    appendControl(row, { label: '文字颜色', key: 'toolboxTextColor', type: 'color' });
+    appendControl(row, { label: '背景颜色', key: 'toolboxBackgroundColor', type: 'color' });
+    row = createRow(toolboxGroup);
+    appendControl(row, { label: '强调颜色', key: 'toolboxAccentColor', type: 'color' });
+    appendControl(row, { label: '背景透明度', key: 'toolboxOpacity', type: 'number', min: 0.2, max: 1, step: 0.05 });
+    const toolboxHint = document.createElement('p');
+    toolboxHint.className = 'cgfc-hint';
+    toolboxHint.textContent = '颜色开关关闭时继续跟随 ChatGPT 明暗主题；面板宽度不会覆盖你手动拖拽保存的浮窗尺寸。';
+    toolboxGroup.appendChild(toolboxHint);
+
+    const queueGroup = createSettingsGroup(panel, '输入框旁发送队列外观');
+    appendControl(queueGroup, { label: '队列字体', key: 'queueFont', type: 'font-select' });
+    row = createRow(queueGroup);
+    appendControl(row, { label: '字号 px', key: 'queueFontSize', type: 'number', min: 9, max: 24, step: 1 });
+    appendControl(row, { label: '行高', key: 'queueLineHeight', type: 'number', min: 1, max: 2.2, step: 0.05 });
+    appendControl(queueGroup, { label: '面板宽度 px', key: 'queuePanelWidth', type: 'number', min: 280, max: 720, step: 10 });
+    appendControl(queueGroup, { label: '启用队列自定义颜色', key: 'queueUseCustomColors', type: 'checkbox' });
+    row = createRow(queueGroup);
+    appendControl(row, { label: '文字颜色', key: 'queueTextColor', type: 'color' });
+    appendControl(row, { label: '背景颜色', key: 'queueBackgroundColor', type: 'color' });
+    row = createRow(queueGroup);
+    appendControl(row, { label: '强调颜色', key: 'queueAccentColor', type: 'color' });
+    appendControl(row, { label: '背景透明度', key: 'queueOpacity', type: 'number', min: 0.2, max: 1, step: 0.05 });
+    const queueHint = document.createElement('p');
+    queueHint.className = 'cgfc-hint';
+    queueHint.textContent = '队列面板会自动限制在当前可视区域内；手机软键盘弹出后也会重新定位。';
+    queueGroup.appendChild(queueHint);
 
     appendControl(panel, { label: '修复外层滚动', key: 'fixOuterScroll', type: 'checkbox' });
     appendControl(panel, { label: '防止自动滚动', key: 'stopAutoScrollWhileGenerating', type: 'checkbox' });
@@ -10796,6 +11001,16 @@
       --cgfc-moz-font-smoothing: grayscale;
       --cgfc-text-rendering: ${defaults.textRenderingMode};
       --cgfc-formula-copy-border-color: ${defaults.formulaCopyBorderColor};
+      --cgfc-toolbox-font: ${defaults.toolboxFont};
+      --cgfc-toolbox-font-size: ${defaults.toolboxFontSize}px;
+      --cgfc-toolbox-line-height: ${defaults.toolboxLineHeight};
+      --cgfc-toolbox-panel-width: ${defaults.toolboxPanelWidth}px;
+      --cgfc-toolbox-accent-color: ${defaults.toolboxAccentColor};
+      --cgfc-queue-font: ${defaults.queueFont};
+      --cgfc-queue-font-size: ${defaults.queueFontSize}px;
+      --cgfc-queue-line-height: ${defaults.queueLineHeight};
+      --cgfc-queue-panel-width: ${defaults.queuePanelWidth}px;
+      --cgfc-queue-accent-color: ${defaults.queueAccentColor};
     }
 
     html[data-cgfc-scroll-fix],
@@ -11065,6 +11280,28 @@
       gap: 10px;
     }
 
+    #${PANEL_ID} .cgfc-settings-group {
+      margin: 12px 0;
+      padding: 0 10px 8px;
+      border: 1px solid rgba(255, 255, 255, .16);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, .035);
+    }
+
+    #${PANEL_ID} .cgfc-settings-group > summary {
+      margin: 0 -10px;
+      padding: 10px;
+      color: #fff;
+      cursor: pointer;
+      font-weight: 700;
+      user-select: none;
+    }
+
+    #${PANEL_ID} .cgfc-settings-group[open] > summary {
+      margin-bottom: 4px;
+      border-bottom: 1px solid rgba(255, 255, 255, .1);
+    }
+
     #${PANEL_ID} .cgfc-actions {
       position: sticky;
       bottom: -14px;
@@ -11093,10 +11330,18 @@
     }
 
     @media (max-width: 520px) {
+      #${TOGGLE_ID} {
+        right: auto;
+        left: max(10px, env(safe-area-inset-left));
+        bottom: max(94px, calc(env(safe-area-inset-bottom) + 82px));
+      }
+
       #${PANEL_ID} {
-        left: 14px;
-        right: 14px;
+        left: max(8px, env(safe-area-inset-left));
+        right: max(8px, env(safe-area-inset-right));
+        top: max(8px, env(safe-area-inset-top));
         width: auto;
+        max-height: calc(100dvh - 76px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
       }
 
       #${PANEL_ID} .cgfc-row {
