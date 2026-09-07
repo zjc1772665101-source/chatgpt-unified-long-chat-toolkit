@@ -1,0 +1,44 @@
+name: Integrate token stats feature
+
+on:
+  push:
+    branches:
+      - feature/token-stats
+    paths:
+      - .github/workflows/integrate-token-stats-feature.yml
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/token-stats
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Integrate token stats into the unified userscript
+        run: node tools/integrate-token-stats.mjs
+
+      - name: Validate userscript syntax
+        run: node --check chatgpt-unified-long-chat-toolkit.user.js
+
+      - name: Keep PR clean and commit the integrated result
+        shell: bash
+        run: |
+          rm -f experiments/chatgpt-token-stats.user.js
+          rm -f tools/integrate-token-stats.mjs
+          rm -f .github/workflows/integrate-token-stats-feature.yml
+          rmdir experiments tools 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat: integrate token stats into v1.5.1" || exit 0
+          git push origin HEAD:feature/token-stats
