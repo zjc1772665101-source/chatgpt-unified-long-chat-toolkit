@@ -1305,16 +1305,17 @@
       style.textContent = `
         .prompt-view { min-height: 0; display: flex; flex: 1; flex-direction: column; overflow: hidden; }
         .prompt-view[hidden] { display: none !important; }
-        .prompt-toolbar, .session-export-toolbar { display: flex; flex: none; gap: 5px; padding: 6px; border-bottom: 1px solid var(--cgfc-theme-border, var(--border-light, rgba(0,0,0,.1))); }
+        .prompt-toolbar, .session-export-toolbar { display: flex; flex: none; gap: 4px; padding: 4px 5px; border-bottom: 1px solid var(--cgfc-theme-border, var(--border-light, rgba(0,0,0,.1))); }
         .prompt-toolbar input, .prompt-toolbar select, .prompt-editor input, .prompt-editor textarea { min-width: 0; border: 1px solid var(--cgfc-theme-border, var(--border-light, rgba(0,0,0,.16))); border-radius: 7px; background: var(--cgfc-theme-surface-primary, var(--main-surface-primary, var(--bg-primary, #fff))); color: var(--cgfc-theme-text-primary, var(--text-primary, #161616)); font: inherit; color-scheme: var(--cgfc-color-scheme, light); }
-        .prompt-toolbar input { flex: 1; padding: 5px 7px; }
-        .prompt-toolbar select { max-width: 88px; padding: 4px; }
-        .prompt-mini-btn { flex: none; min-height: 29px; padding: 4px 7px; border: 0; border-radius: 7px; background: var(--cgfc-theme-surface-secondary, var(--main-surface-secondary, var(--bg-secondary, #eee))); color: var(--cgfc-theme-text-primary, var(--text-primary, #161616)); font: inherit; cursor: pointer; }
+        .prompt-toolbar input { flex: 1; padding: 4px 6px; }
+        .prompt-toolbar select { max-width: 84px; padding: 3px 4px; }
+        .prompt-mini-btn { flex: none; min-height: 27px; padding: 3px 6px; border: 0; border-radius: 7px; background: var(--cgfc-theme-surface-secondary, var(--main-surface-secondary, var(--bg-secondary, #eee))); color: var(--cgfc-theme-text-primary, var(--text-primary, #161616)); font: inherit; cursor: pointer; white-space: nowrap; }
         .prompt-mini-btn:hover { background: color-mix(in srgb, var(--cgfc-theme-text-primary, currentColor) 8%, var(--cgfc-theme-surface-secondary, transparent)); }
         .prompt-mini-btn[hidden] { display: none !important; }
         .prompt-mini-btn.danger { margin-right: auto; background: color-mix(in srgb, #dc2626 14%, var(--cgfc-theme-surface-secondary, var(--main-surface-secondary, var(--bg-secondary, #eee)))); color: #dc2626; }
         .session-export-toolbar { align-items: center; color: var(--cgfc-theme-text-tertiary, var(--text-tertiary, #777)); font-size: 11px; }
-        .session-export-toolbar .prompt-mini-btn { min-height: 25px; padding: 3px 6px; font-size: 11px; }
+        .session-export-toolbar > span:first-child { flex: none; white-space: nowrap; }
+        .session-export-toolbar .prompt-mini-btn { min-height: 24px; padding: 2px 5px; font-size: 11px; }
         .prompt-list { min-height: 0; flex: 1; overflow-y: auto; padding: 6px; scrollbar-width: thin; }
         .prompt-card { position: relative; margin-bottom: 5px; padding: 8px; border: 1px solid transparent; border-radius: 9px; background: color-mix(in srgb, var(--cgfc-theme-surface-secondary, var(--main-surface-secondary, #eee)) 58%, transparent); cursor: grab; transition: border-color 120ms ease, opacity 120ms ease, transform 120ms ease; }
         .prompt-card[data-pinned="true"] { border-color: color-mix(in srgb, #d99b18 45%, transparent); }
@@ -3481,14 +3482,14 @@
           }
 
           .panel-header {
-            min-height: 42px;
+            min-height: 36px;
             display: flex;
             flex: none;
             align-items: center;
-            gap: 8px;
-            padding-block: 7px;
-            padding-inline-start: 9px;
-            padding-inline-end: 24px;
+            gap: 7px;
+            padding-block: 5px;
+            padding-inline-start: 8px;
+            padding-inline-end: 20px;
             border-bottom: 1px solid var(--border-light, rgba(0, 0, 0, 0.11));
             cursor: grab;
             touch-action: none;
@@ -3553,8 +3554,8 @@
           .icon-button {
             position: relative;
             z-index: 4;
-            width: 29px;
-            height: 29px;
+            width: 27px;
+            height: 27px;
             display: inline-flex;
             flex: none;
             align-items: center;
@@ -3576,24 +3577,25 @@
             display: grid;
             flex: none;
             grid-template-columns: repeat(3, minmax(0, 1fr));
-            gap: 4px;
-            padding: 5px 6px;
+            gap: 3px;
+            padding: 3px 5px;
             border-bottom: 1px solid var(--border-light, rgba(0, 0, 0, 0.09));
           }
 
           .view-tab {
             min-width: 0;
-            min-height: 31px;
+            min-height: 28px;
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            gap: 6px;
-            padding: 5px 8px;
+            gap: 4px;
+            padding: 3px 5px;
             border: 0;
             border-radius: 8px;
             background: transparent;
             color: var(--cgfc-toolbox-muted-color, var(--text-secondary, #4a4a4a));
             cursor: pointer;
+            white-space: nowrap;
           }
 
           .view-tab:hover {
@@ -3612,8 +3614,8 @@
           }
 
           .view-count {
-            min-width: 1.6em;
-            padding: 1px 5px;
+            min-width: 1.45em;
+            padding: 0 4px;
             border-radius: 999px;
             background: color-mix(in srgb, currentColor 10%, transparent);
             font-size: 10px;
