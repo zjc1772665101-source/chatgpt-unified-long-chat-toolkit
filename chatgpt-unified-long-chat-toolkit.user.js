@@ -648,6 +648,13 @@
       this.rootId = 'cgpt-unified-token-stats';
       this.chipAttr = 'data-cgpt-token-chip';
       this.enabledAttr = 'data-cgpt-token-stats-enabled';
+      this.messageChipsAttr = 'data-cgpt-token-message-chips-enabled';
+      this.summaryAttr = 'data-cgpt-token-summary-enabled';
+      this.summaryPositionAttr = 'data-cgpt-token-summary-position';
+      this.summaryOffsetXAttr = 'data-cgpt-token-summary-offset-x';
+      this.summaryOffsetYAttr = 'data-cgpt-token-summary-offset-y';
+      this.summaryCompactAttr = 'data-cgpt-token-summary-compact-narrow';
+      this.summaryAvoidQueueAttr = 'data-cgpt-token-summary-avoid-queue';
       this.apiMaxAgeMs = 60000;
       this.domDebounceMs = 240;
       this.active = false;
@@ -656,9 +663,17 @@
       this.observationRoot = null;
       this.refreshTimer = 0;
       this.mutationTimer = 0;
+      this.positionRaf = 0;
       this.lastGenerating = false;
       this.apiFailureKey = '';
-      this.onSettingsChange = () => this.syncEnabledState();
+      this.onSettingsChange = () => {
+        this.syncEnabledState();
+        if (this.active) {
+          this.syncSubfeatureVisibility();
+          this.schedulePosition();
+        }
+      };
+      this.onViewportChange = () => this.schedulePosition();
     }
 
     init() {
@@ -679,6 +694,41 @@
       return document.documentElement?.hasAttribute(this.enabledAttr) === true;
     }
 
+    isSubfeatureEnabled(attr) {
+      return document.documentElement?.hasAttribute(attr) === true;
+    }
+
+    showMessageChips() {
+      return this.isSubfeatureEnabled(this.messageChipsAttr, true);
+    }
+
+    showSummary() {
+      return this.isSubfeatureEnabled(this.summaryAttr, true);
+    }
+
+    compactOnNarrow() {
+      return this.isSubfeatureEnabled(this.summaryCompactAttr, true);
+    }
+
+    avoidQueue() {
+      return this.isSubfeatureEnabled(this.summaryAvoidQueueAttr, true);
+    }
+
+    summaryPosition() {
+      return document.documentElement?.getAttribute(this.summaryPositionAttr) || 'auto';
+    }
+
+    summaryOffset(attr) {
+      const value = Number.parseFloat(document.documentElement?.getAttribute(attr) || '0');
+      return Number.isFinite(value) ? value : 0;
+    }
+
+    syncSubfeatureVisibility() {
+      if (!this.showMessageChips()) this.removeMessageChips();
+      if (!this.showSummary()) this.removeSummary();
+      else this.scheduleRefresh(false);
+    }
+
     syncEnabledState() {
       if (this.isEnabled()) this.start();
       else this.stop();
@@ -687,12 +737,18 @@
     start() {
       if (this.active) {
         this.bindObserver();
+        this.syncSubfeatureVisibility();
         this.scheduleRefresh(false);
+        this.schedulePosition();
         return;
       }
       this.active = true;
       this.href = location.href;
       this.bindObserver();
+      window.addEventListener('resize', this.onViewportChange, { passive: true });
+      window.addEventListener('scroll', this.onViewportChange, { capture: true, passive: true });
+      window.visualViewport?.addEventListener('resize', this.onViewportChange, { passive: true });
+      window.visualViewport?.addEventListener('scroll', this.onViewportChange, { passive: true });
       this.scheduleRefresh(true);
       this.refreshTimer = window.setInterval(() => {
         if (!this.active) return;
@@ -705,6 +761,7 @@
           return;
         }
         this.scheduleRefresh(false);
+        this.schedulePosition();
       }, 4000);
     }
 
@@ -712,17 +769,31 @@
       this.active = false;
       clearInterval(this.refreshTimer);
       clearTimeout(this.mutationTimer);
+      if (this.positionRaf) cancelAnimationFrame(this.positionRaf);
       this.refreshTimer = 0;
       this.mutationTimer = 0;
+      this.positionRaf = 0;
+      window.removeEventListener('resize', this.onViewportChange);
+      window.removeEventListener('scroll', this.onViewportChange, true);
+      window.visualViewport?.removeEventListener('resize', this.onViewportChange);
+      window.visualViewport?.removeEventListener('scroll', this.onViewportChange);
       this.observer?.disconnect();
       this.observer = null;
       this.observationRoot = null;
       this.removeUi();
     }
 
-    removeUi() {
+    removeSummary() {
       document.getElementById(this.rootId)?.remove();
+    }
+
+    removeMessageChips() {
       document.querySelectorAll(`[${this.chipAttr}]`).forEach((node) => node.remove());
+    }
+
+    removeUi() {
+      this.removeSummary();
+      this.removeMessageChips();
     }
 
     bindObserver() {
@@ -868,20 +939,23 @@
       style.id = styleId;
       style.textContent = `
         #${this.rootId} {
-          position: fixed; right: max(14px, env(safe-area-inset-right));
-          bottom: max(78px, calc(env(safe-area-inset-bottom) + 78px));
-          z-index: 2147483000; color: var(--cgfc-theme-text-primary, var(--text-primary, #161616));
+          position: fixed; left: 10px; top: 10px;
+          z-index: 2147482400; color: var(--cgfc-theme-text-primary, var(--text-primary, #161616));
           font: 12px/1.35 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          pointer-events: none;
         }
         #${this.rootId} .cgpt-token-pill {
           display: flex; align-items: center; gap: 7px; padding: 7px 10px;
           border: 1px solid var(--cgfc-theme-border, color-mix(in srgb, currentColor 16%, transparent)); border-radius: 999px;
           background: color-mix(in srgb, var(--cgfc-theme-surface-primary, var(--main-surface-primary, var(--bg-primary, #fff))) 92%, transparent); box-shadow: var(--cgfc-theme-shadow-soft, 0 4px 16px rgba(0,0,0,.10));
           backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
-          cursor: default; user-select: none; white-space: nowrap;
+          cursor: default; user-select: none; white-space: nowrap; pointer-events: auto;
         }
         #${this.rootId} .cgpt-token-muted { opacity: .58; }
         #${this.rootId} .cgpt-token-sep { opacity: .22; }
+        #${this.rootId} .cgpt-token-compact { display: none; font-variant-numeric: tabular-nums; letter-spacing: .01em; }
+        #${this.rootId}[data-compact="true"] .cgpt-token-full { display: none; }
+        #${this.rootId}[data-compact="true"] .cgpt-token-compact { display: inline; }
         [${this.chipAttr}] {
           display: inline-flex; align-items: center; margin-inline-start: 6px; padding: 1px 5px;
           border: 1px solid color-mix(in srgb, currentColor 13%, transparent); border-radius: 999px;
@@ -889,7 +963,7 @@
           opacity: .52; vertical-align: middle; white-space: nowrap; user-select: none;
         }
         @media (max-width: 640px) {
-          #${this.rootId} { right: 8px; bottom: max(70px, calc(env(safe-area-inset-bottom) + 70px)); font-size: 11px; }
+          #${this.rootId} { font-size: 11px; }
           #${this.rootId} .cgpt-token-pill { gap: 5px; padding: 6px 8px; }
         }
       `;
@@ -897,28 +971,47 @@
     }
 
     ensureSummary() {
-      if (!document.body || !this.exporter.getConversationId()) return null;
+      if (!this.showSummary() || !document.body || !this.exporter.getConversationId()) return null;
       this.ensureStyles();
       let root = document.getElementById(this.rootId);
       if (root) return root;
       root = document.createElement('div');
       root.id = this.rootId;
-      root.innerHTML = '<div class="cgpt-token-pill" title="估算当前活动分支的可见用户/助手文本 Token；不包含系统指令、记忆、工具定义、隐藏推理等服务端上下文，因此不是官方 usage。"><span data-slot="input">输入 ≈0 tok</span><span class="cgpt-token-sep">·</span><span data-slot="output">输出 ≈0 tok</span><span class="cgpt-token-sep">·</span><span class="cgpt-token-muted" data-slot="context">可见上下文 ≈0 tok</span></div>';
+      root.innerHTML = '<div class="cgpt-token-pill"><span class="cgpt-token-full"><span data-slot="input">输入 ≈0 tok</span><span class="cgpt-token-sep"> · </span><span data-slot="output">输出 ≈0 tok</span><span class="cgpt-token-sep"> · </span><span class="cgpt-token-muted" data-slot="context">可见上下文 ≈0 tok</span></span><span class="cgpt-token-compact" data-slot="compact">0/0/0</span></div>';
       document.body.appendChild(root);
       return root;
     }
 
     renderSummary(messages) {
+      if (!this.showSummary()) {
+        this.removeSummary();
+        return;
+      }
       const root = this.ensureSummary();
       if (!root) return;
       const round = this.latestRound(messages);
       const total = messages.reduce((sum, message) => sum + (message.tokens || 0), 0);
-      root.querySelector('[data-slot="input"]').textContent = `输入 ≈${this.formatCount(round.input)} tok`;
-      root.querySelector('[data-slot="output"]').textContent = `输出 ≈${this.formatCount(round.output)} tok`;
-      root.querySelector('[data-slot="context"]').textContent = `可见上下文 ≈${this.formatCount(total)} tok`;
+      const input = this.formatCount(round.input);
+      const output = this.formatCount(round.output);
+      const context = this.formatCount(total);
+      root.querySelector('[data-slot="input"]').textContent = `输入 ≈${input} tok`;
+      root.querySelector('[data-slot="output"]').textContent = `输出 ≈${output} tok`;
+      root.querySelector('[data-slot="context"]').textContent = `可见上下文 ≈${context} tok`;
+      root.querySelector('[data-slot="compact"]').textContent = `${input}/${output}/${context}`;
+      const pill = root.querySelector('.cgpt-token-pill');
+      const title = `可见文本 Token 估算：输入 ≈${input}，输出 ≈${output}，可见上下文 ≈${context}。不包含系统指令、记忆、工具定义、隐藏推理等服务端上下文，因此不是官方 usage。`;
+      pill?.setAttribute('title', title);
+      pill?.setAttribute('aria-label', title);
+      const narrow = this.compactOnNarrow() && (window.visualViewport?.width || window.innerWidth || 0) <= 640;
+      root.dataset.compact = String(narrow);
+      this.schedulePosition();
     }
 
     renderMessageChips() {
+      if (!this.showMessageChips()) {
+        this.removeMessageChips();
+        return;
+      }
       for (const roleNode of this.getAttachedRoleNodes()) {
         const content = this.extractAttachedContent(roleNode);
         if (!content) continue;
@@ -934,6 +1027,131 @@
       }
     }
 
+    findComposerForSummary() {
+      const fromRuntime = runtime.promptLibrary?.findComposer?.();
+      if (fromRuntime instanceof Element) return fromRuntime;
+      return document.querySelector([
+        '#prompt-textarea',
+        '.ProseMirror[contenteditable="true"]',
+        '[contenteditable="true"][role="textbox"]',
+        'textarea[name="prompt-textarea"]',
+      ].join(', '));
+    }
+
+    resolveComposerShellForSummary(composer) {
+      if (!(composer instanceof Element)) return null;
+      const fromQueue = runtime.composerQueueDock?.resolveComposerShell?.(composer);
+      if (fromQueue instanceof Element) return fromQueue;
+      return composer.closest('form[data-type*="composer" i], form[class*="composer" i], [data-testid*="composer" i], form')
+        || composer.parentElement
+        || composer;
+    }
+
+    getVisibleQueueRects() {
+      return Array.from(document.querySelectorAll('.cgpt-queue-capsule, .cgpt-queue-panel'))
+        .filter((node) => {
+          if (!(node instanceof HTMLElement) || node.hidden || !node.isConnected) return false;
+          const style = getComputedStyle(node);
+          if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || 1) <= 0) return false;
+          const rect = node.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        })
+        .map((node) => node.getBoundingClientRect());
+    }
+
+    rectsOverlap(a, b, padding = 6) {
+      return a.left < b.right + padding
+        && a.right > b.left - padding
+        && a.top < b.bottom + padding
+        && a.bottom > b.top - padding;
+    }
+
+    schedulePosition() {
+      if (!this.active || !this.showSummary() || this.positionRaf) return;
+      this.positionRaf = window.requestAnimationFrame(() => {
+        this.positionRaf = 0;
+        this.refreshPosition();
+      });
+    }
+
+    refreshPosition() {
+      const root = document.getElementById(this.rootId);
+      if (!(root instanceof HTMLElement) || !this.showSummary()) return;
+
+      const visualViewport = window.visualViewport;
+      const viewportLeft = Math.max(0, visualViewport?.offsetLeft || 0);
+      const viewportTop = Math.max(0, visualViewport?.offsetTop || 0);
+      const viewportWidth = Math.max(240, visualViewport?.width || document.documentElement.clientWidth || window.innerWidth || 320);
+      const viewportHeight = Math.max(240, visualViewport?.height || document.documentElement.clientHeight || window.innerHeight || 320);
+      const viewportRight = viewportLeft + viewportWidth;
+      const viewportBottom = viewportTop + viewportHeight;
+      const edge = 10;
+
+      const compact = this.compactOnNarrow() && viewportWidth <= 640;
+      root.dataset.compact = String(compact);
+      const measured = root.getBoundingClientRect();
+      const width = Math.max(1, measured.width);
+      const height = Math.max(1, measured.height);
+
+      const composer = this.findComposerForSummary();
+      const shell = this.resolveComposerShellForSummary(composer);
+      const composerRect = shell instanceof Element ? shell.getBoundingClientRect() : null;
+      const offsetX = this.summaryOffset(this.summaryOffsetXAttr);
+      const offsetY = this.summaryOffset(this.summaryOffsetYAttr);
+
+      const clampPoint = (point) => ({
+        left: Math.min(viewportRight - edge - width, Math.max(viewportLeft + edge, point.left + offsetX)),
+        top: Math.min(viewportBottom - edge - height, Math.max(viewportTop + edge, point.top + offsetY)),
+      });
+      const makeRect = (point) => ({
+        left: point.left,
+        top: point.top,
+        right: point.left + width,
+        bottom: point.top + height,
+      });
+      const candidate = (position) => {
+        if (position === 'viewport-bottom-left') return clampPoint({ left: viewportLeft + edge, top: viewportBottom - edge - height });
+        if (position === 'viewport-bottom-right') return clampPoint({ left: viewportRight - edge - width, top: viewportBottom - edge - height });
+        if (!composerRect || composerRect.width <= 0 || composerRect.height <= 0) {
+          return clampPoint({ left: viewportRight - edge - width, top: viewportBottom - edge - height - 70 });
+        }
+        const top = composerRect.top - height - 8;
+        if (position === 'composer-top-left') return clampPoint({ left: composerRect.left + 8, top });
+        if (position === 'composer-top-right') return clampPoint({ left: composerRect.right - width - 8, top });
+        return clampPoint({ left: composerRect.left + (composerRect.width - width) / 2, top });
+      };
+
+      const requested = this.summaryPosition();
+      const queueRects = this.avoidQueue() ? this.getVisibleQueueRects() : [];
+      const collides = (point) => queueRects.some((queueRect) => this.rectsOverlap(makeRect(point), queueRect));
+      let point;
+
+      if (requested === 'auto') {
+        const order = [
+          'composer-top-center',
+          'composer-top-left',
+          'composer-top-right',
+          'viewport-bottom-left',
+          'viewport-bottom-right',
+        ];
+        point = order.map(candidate).find((item) => !collides(item)) || candidate('composer-top-center');
+      } else {
+        point = candidate(requested);
+        if (queueRects.length && collides(point)) {
+          const overlapping = queueRects.find((queueRect) => this.rectsOverlap(makeRect(point), queueRect));
+          if (overlapping) {
+            const nudged = clampPoint({ left: point.left - offsetX, top: overlapping.top - height - 8 - offsetY });
+            if (!collides(nudged)) point = nudged;
+          }
+        }
+      }
+
+      root.style.left = `${Math.round(point.left)}px`;
+      root.style.top = `${Math.round(point.top)}px`;
+      root.style.removeProperty('right');
+      root.style.removeProperty('bottom');
+    }
+
     isGenerating() {
       return Boolean(document.querySelector('[data-testid="stop-button"], button[aria-label*="Stop" i], button[aria-label*="停止"]'));
     }
@@ -944,7 +1162,18 @@
         this.removeUi();
         return;
       }
-      this.renderMessageChips();
+      const showChips = this.showMessageChips();
+      const showSummary = this.showSummary();
+      if (!showChips && !showSummary) {
+        this.removeUi();
+        return;
+      }
+      if (showChips) this.renderMessageChips();
+      else this.removeMessageChips();
+      if (!showSummary) {
+        this.removeSummary();
+        return;
+      }
       const domMessages = this.collectAttachedMessages();
       let apiMessages = [];
       try {
@@ -8946,6 +9175,13 @@
     queueAccentColor: '#6d5dfc',
     queueOpacity: 0.94,
     showTokenStats: true,
+    showTokenMessageChips: true,
+    showTokenSummary: true,
+    tokenSummaryPosition: 'auto',
+    tokenSummaryOffsetX: 0,
+    tokenSummaryOffsetY: 0,
+    tokenSummaryCompactOnNarrow: true,
+    tokenSummaryAvoidQueue: true,
   };
 
   // Appearance values are stored independently from whether the script is
@@ -9019,6 +9255,13 @@
     queueAccentColor: 'color',
     queueOpacity: 'number',
     showTokenStats: 'boolean',
+    showTokenMessageChips: 'boolean',
+    showTokenSummary: 'boolean',
+    tokenSummaryPosition: 'select',
+    tokenSummaryOffsetX: 'number',
+    tokenSummaryOffsetY: 'number',
+    tokenSummaryCompactOnNarrow: 'boolean',
+    tokenSummaryAvoidQueue: 'boolean',
   };
   for (const key of OVERRIDEABLE_SETTING_KEYS) {
     settingTypes[overrideEnabledKey(key)] = 'boolean';
@@ -9038,12 +9281,22 @@
     queueLineHeight: [1, 2.2],
     queuePanelWidth: [280, 720],
     queueOpacity: [0.2, 1],
+    tokenSummaryOffsetX: [-600, 600],
+    tokenSummaryOffsetY: [-600, 600],
   };
 
   const selectValues = {
     mathFontMode: ['native', 'off'],
     fontSmoothingMode: ['auto', 'antialiased', 'subpixel-antialiased'],
     textRenderingMode: ['auto', 'optimizeLegibility', 'geometricPrecision'],
+    tokenSummaryPosition: [
+      'auto',
+      'composer-top-center',
+      'composer-top-left',
+      'composer-top-right',
+      'viewport-bottom-left',
+      'viewport-bottom-right',
+    ],
   };
 
   const versionNoticeText = [
@@ -9600,6 +9853,13 @@
     root.toggleAttribute('data-cgfc-katex-letter-font', settings.enableKatexLetterFont && enabled('mathFont'));
     root.toggleAttribute('data-cgfc-formula-copy', settings.enableFormulaCopy);
     root.toggleAttribute('data-cgpt-token-stats-enabled', settings.showTokenStats);
+    root.toggleAttribute('data-cgpt-token-message-chips-enabled', settings.showTokenMessageChips);
+    root.toggleAttribute('data-cgpt-token-summary-enabled', settings.showTokenSummary);
+    root.setAttribute('data-cgpt-token-summary-position', normalizeSetting('tokenSummaryPosition', settings.tokenSummaryPosition));
+    root.setAttribute('data-cgpt-token-summary-offset-x', String(normalizeSetting('tokenSummaryOffsetX', settings.tokenSummaryOffsetX)));
+    root.setAttribute('data-cgpt-token-summary-offset-y', String(normalizeSetting('tokenSummaryOffsetY', settings.tokenSummaryOffsetY)));
+    root.toggleAttribute('data-cgpt-token-summary-compact-narrow', settings.tokenSummaryCompactOnNarrow);
+    root.toggleAttribute('data-cgpt-token-summary-avoid-queue', settings.tokenSummaryAvoidQueue);
     document.dispatchEvent(new CustomEvent('cgpt-unified-ui-settings-change'));
     return true;
   }
@@ -10889,10 +11149,30 @@
     queueGroup.appendChild(queueHint);
 
     const statsGroup = createSettingsGroup(panel, 'Token 统计（估算）');
-    appendControl(statsGroup, { label: '显示逐消息与本轮 Token 估算', key: 'showTokenStats', type: 'checkbox' });
+    appendControl(statsGroup, { label: '启用 Token 统计', key: 'showTokenStats', type: 'checkbox' });
+    appendControl(statsGroup, { label: '显示逐消息 Token 标签', key: 'showTokenMessageChips', type: 'checkbox' });
+    appendControl(statsGroup, { label: '显示本轮总览贴片', key: 'showTokenSummary', type: 'checkbox' });
+    appendControl(statsGroup, {
+      label: '总览贴片位置',
+      key: 'tokenSummaryPosition',
+      type: 'select',
+      choices: [
+        { value: 'auto', label: '自动避让' },
+        { value: 'composer-top-center', label: '输入框上方 · 居中' },
+        { value: 'composer-top-left', label: '输入框上方 · 左侧' },
+        { value: 'composer-top-right', label: '输入框上方 · 右侧' },
+        { value: 'viewport-bottom-left', label: '视口左下角' },
+        { value: 'viewport-bottom-right', label: '视口右下角' },
+      ],
+    });
+    row = createRow(statsGroup);
+    appendControl(row, { label: '水平偏移 px', key: 'tokenSummaryOffsetX', type: 'number', min: -600, max: 600, step: 1 });
+    appendControl(row, { label: '垂直偏移 px', key: 'tokenSummaryOffsetY', type: 'number', min: -600, max: 600, step: 1 });
+    appendControl(statsGroup, { label: '窄屏自动使用紧凑格式（6/235/2.4k）', key: 'tokenSummaryCompactOnNarrow', type: 'checkbox' });
+    appendControl(statsGroup, { label: '自动避让发送队列', key: 'tokenSummaryAvoidQueue', type: 'checkbox' });
     const tokenStatsHint = document.createElement('p');
     tokenStatsHint.className = 'cgfc-hint';
-    tokenStatsHint.textContent = '统计当前活动分支中可见的用户/助手文本，并显示本轮输入、输出和可见上下文。服务端系统指令、记忆、工具定义、隐藏推理等不可见内容不会计入，因此它不是官方 usage。';
+    tokenStatsHint.textContent = '统计当前活动分支中可见的用户/助手文本。总览依次表示本轮输入、输出和可见上下文；窄屏紧凑格式为“输入/输出/上下文”。系统指令、记忆、工具定义、隐藏推理等不可见内容不会计入，因此它只是近似值，不是官方 usage。';
     statsGroup.appendChild(tokenStatsHint);
 
     appendControl(panel, { label: '修复外层滚动', key: 'fixOuterScroll', type: 'checkbox' });
