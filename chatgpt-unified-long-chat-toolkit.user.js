@@ -1731,8 +1731,7 @@
         '[contenteditable="true"][role="textbox"]',
         'form[class*="composer"] [contenteditable="true"]',
         'textarea[name="prompt-textarea"]',
-      ].join(', ')))];
-      return candidates.find((element) => {
+      ].join(', ')))].filter((element) => {
         if (!element?.isConnected || element.hasAttribute('disabled')) return false;
         if (element.getAttribute('aria-disabled') === 'true' || element.getAttribute('contenteditable') === 'false') return false;
         const view = element.ownerDocument?.defaultView || window;
@@ -1743,7 +1742,23 @@
           && Number(style.opacity || 1) > 0
           && rect.width > 0
           && rect.height > 0;
-      }) || null;
+      });
+      if (!candidates.length) return null;
+
+      const viewportBottom = window.visualViewport
+        ? window.visualViewport.offsetTop + window.visualViewport.height
+        : (document.documentElement.clientHeight || window.innerHeight || 0);
+      const score = (element) => {
+        const rect = element.getBoundingClientRect();
+        let value = 0;
+        if (element.id === 'prompt-textarea') value += 120;
+        if (element.matches('textarea[name="prompt-textarea"]')) value += 80;
+        if (element.closest('form[data-type*="composer" i], form[class*="composer" i], [data-testid*="composer" i]')) value += 70;
+        if (element.closest('[data-message-author-role], article, dialog, [role="dialog"]')) value -= 140;
+        value += Math.max(0, 70 - Math.max(0, viewportBottom - rect.bottom) / 4);
+        return value;
+      };
+      return candidates.sort((a, b) => score(b) - score(a))[0] || null;
     }
 
     insertIntoComposer(text, options = {}) {
@@ -2746,28 +2761,37 @@
       if (!(composer instanceof Element)) return null;
       const sendButton = this.runtime.promptLibrary?.findSendButton?.(composer) || null;
       const composerRect = composer.getBoundingClientRect();
+      const maxShellHeight = Math.max(180, composerRect.height * 4.5);
+      const maxTopDrift = Math.max(120, composerRect.height * 3);
+      const candidates = [];
       let node = composer.parentElement;
-      let firstCommon = null;
-      let roundedCommon = null;
+
       for (let depth = 0; node && node !== document.body && depth < 12; depth += 1, node = node.parentElement) {
         const rect = node.getBoundingClientRect();
         if (rect.width <= 0 || rect.height <= 0) continue;
-        if (sendButton && !node.contains(sendButton)) continue;
-        if (!firstCommon) firstCommon = node;
+        const coversComposer = rect.left <= composerRect.left + 2
+          && rect.right >= composerRect.right - 2
+          && rect.top <= composerRect.top + 2
+          && rect.bottom >= composerRect.bottom - 2;
+        if (!coversComposer) continue;
+
+        const topDrift = Math.max(0, composerRect.top - rect.top);
+        if (rect.height > maxShellHeight || topDrift > maxTopDrift) continue;
+
         const radius = Number.parseFloat(getComputedStyle(node).borderRadius || '0') || 0;
-        const coversComposer = rect.width >= composerRect.width * 0.9 && rect.height >= composerRect.height;
-        if (coversComposer && radius >= 12) {
-          roundedCommon = node;
-          break;
-        }
-        if (node.matches('form[data-type*="composer" i], form[class*="composer" i], [data-testid*="composer" i]')) {
-          roundedCommon = node;
-          break;
-        }
+        const semantic = node.matches('form[data-type*="composer" i], form[class*="composer" i], [data-testid*="composer" i]');
+        const containsSend = Boolean(sendButton && node.contains(sendButton));
+        let score = 0;
+        if (containsSend) score += 8;
+        if (semantic) score += 6;
+        if (radius >= 12) score += 4;
+        score -= Math.min(4, topDrift / 40);
+        score -= Math.min(3, Math.max(0, rect.height - composerRect.height) / 60);
+        candidates.push({ node, score, depth });
       }
-      if (roundedCommon) return roundedCommon;
-      if (firstCommon) return firstCommon;
-      return composer.closest('form') || composer.parentElement || composer;
+
+      candidates.sort((a, b) => b.score - a.score || a.depth - b.depth);
+      return candidates[0]?.node || composer;
     }
 
     observeShell(shell) {
