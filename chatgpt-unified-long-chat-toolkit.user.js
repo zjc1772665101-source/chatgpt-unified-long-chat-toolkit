@@ -2524,7 +2524,7 @@
         .cgpt-queue-compose { display: flex; gap: 7px; padding: 9px 10px; align-items: flex-end; border-top: 1px solid var(--cgfc-theme-border, var(--border-light, rgba(0,0,0,.1))); }
         .cgpt-queue-compose textarea { min-width: 0; min-height: 38px; max-height: 112px; flex: 1; padding: 8px 10px; resize: vertical; border: 1px solid var(--cgfc-theme-border, var(--border-light, rgba(0,0,0,.15))); border-radius: 9px; background: var(--cgfc-theme-surface-primary, var(--main-surface-primary, #fff)); color: var(--cgfc-queue-text-color, var(--cgfc-theme-text-primary, var(--text-primary, #161616))); font: inherit; font-size: 1em; line-height: inherit; outline: none; color-scheme: var(--cgfc-color-scheme, light); }
         .cgpt-queue-compose textarea:focus { border-color: color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 60%, var(--cgfc-theme-border, var(--border-light, rgba(0,0,0,.15)))); box-shadow: 0 0 0 3px color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 12%, transparent); }
-        .cgpt-queue-enqueue { width: 38px; height: 38px; flex: none; border: 0; border-radius: 9px; background: var(--cgfc-queue-accent-color, #6d5dfc); color: #fff; cursor: pointer; font-size: 17px; line-height: 1; }
+        .cgpt-queue-enqueue { width: 38px; height: 38px; flex: none; border: 0; border-radius: 50%; background: var(--cgfc-queue-accent-color, #6d5dfc); color: #fff; cursor: pointer; font-size: 17px; line-height: 1; }
         .cgpt-queue-enqueue:disabled { opacity: .45; cursor: default; }
         .cgpt-queue-footer { display: flex; min-height: 26px; padding: 0 11px 8px; align-items: center; gap: 6px; color: var(--cgfc-queue-muted-color, var(--cgfc-theme-text-tertiary, var(--text-tertiary, #888))); font-size: .833em; }
         .cgpt-queue-dot { width: 6px; height: 6px; border-radius: 50%; background: #22c55e; }
@@ -9154,11 +9154,9 @@
   const TOGGLE_ID = 'cgfc-toggle';
   const PANEL_ID = 'cgfc-panel';
   const FONT_STATUS_ID = 'cgfc-font-scan-status';
-  const HIDDEN_NOTICE_CLASS = 'ophel-clean-mode-version-notice-hidden';
   const CHATGPT_DISCLAIMER_TEXT = 'ChatGPT 也可能会犯错。请核查重要信息。';
   const CHATGPT_DISCLAIMER_KEY = CHATGPT_DISCLAIMER_TEXT.replace(/\s+/g, '');
   const HIDDEN_DISCLAIMER_CLASS = 'ophel-chatgpt-disclaimer-hidden';
-  const CLEAN_MODE_STYLE_ID = 'gh-clean-mode-styles';
   const KATEX_STYLE_ID = 'cgfc-katex-resource-style';
   const RESIDUAL_WRAPPER_CLASS = 'cgfc-residual-latex';
   const RESIDUAL_ROOT_MARKER = 'data-cgfc-residual-root';
@@ -9191,10 +9189,8 @@
     normalColor: '#ffffff',
     boldColor: '#e8e2d8',
     boldWeight: 750,
-    fixOuterScroll: true,
     stopAutoScrollWhileGenerating: true,
     wrapCode: true,
-    hideVersionNotice: true,
     enableFontSmoothing: true,
     fontSmoothingMode: 'antialiased',
     textRenderingMode: 'optimizeLegibility',
@@ -9271,10 +9267,8 @@
     normalColor: 'color',
     boldColor: 'color',
     boldWeight: 'number',
-    fixOuterScroll: 'boolean',
     stopAutoScrollWhileGenerating: 'boolean',
     wrapCode: 'boolean',
-    hideVersionNotice: 'boolean',
     enableFontSmoothing: 'boolean',
     fontSmoothingMode: 'select',
     textRenderingMode: 'select',
@@ -9346,15 +9340,6 @@
     ],
   };
 
-  const versionNoticeText = [
-    '新的 GPT 版本现已推出',
-    '继续聊天以使用旧版本',
-    '开始新的聊天以使用最新版本',
-    'A new version of GPT is available',
-    'Continue chatting to use the old version',
-    'Start a new chat to use the latest version',
-  ];
-
   const FONT_SETTING_KEYS = new Set([
     'latinFont', 'chineseFont', 'boldLatinFont', 'boldChineseFont', 'mathFont', 'codeFont',
     'toolboxFont', 'queueFont',
@@ -9413,7 +9398,6 @@
 
   let settings = loadSettings();
   let saveTimer = 0;
-  let noticeTimer = 0;
   let disclaimerTimer = 0;
   let shellGuardTimer = 0;
   let observersStarted = false;
@@ -9722,19 +9706,6 @@
     return true;
   }
 
-  function hasInternalScrollContainer() {
-    const candidates = document.querySelectorAll(
-      'main, [role="main"], [data-scroll-root], [class*="overflow-y-auto"], [class*="overflow-auto"]'
-    );
-    for (const element of candidates) {
-      const style = getComputedStyle(element);
-      if (/(auto|scroll|overlay)/.test(`${style.overflowY} ${style.overflow}`) && element.clientHeight > 0) {
-        return true;
-      }
-    }
-    return false;
-  }
-
   function applySettings() {
     const root = document.documentElement;
     if (!root) return false;
@@ -9895,7 +9866,6 @@
     root.dataset.cgfcMathMode = enabled('mathFontMode')
       ? normalizeSetting('mathFontMode', settings.mathFontMode)
       : 'off';
-    root.toggleAttribute('data-cgfc-scroll-fix', settings.fixOuterScroll && hasInternalScrollContainer());
     root.toggleAttribute('data-cgfc-wrap-code', settings.wrapCode);
     root.toggleAttribute('data-cgfc-katex-letter-font', settings.enableKatexLetterFont && enabled('mathFont'));
     root.toggleAttribute('data-cgfc-formula-copy', settings.enableFormulaCopy);
@@ -10336,7 +10306,6 @@
     applySettings();
     persistSoon();
 
-    if (key === 'hideVersionNotice') queueNoticeScan();
     if (key === 'stopAutoScrollWhileGenerating') refreshAutoScrollLockState();
     if (key === 'enableResidualLatex' && settings.enableResidualLatex) {
       installKatexCss();
@@ -11222,10 +11191,8 @@
     tokenStatsHint.textContent = '统计当前活动分支中可见的用户/助手文本。总览依次表示本轮输入、输出和可见上下文；窄屏紧凑格式为“输入/输出/上下文”。系统指令、记忆、工具定义、隐藏推理等不可见内容不会计入，因此它只是近似值，不是官方 usage。';
     statsGroup.appendChild(tokenStatsHint);
 
-    appendControl(panel, { label: '修复外层滚动', key: 'fixOuterScroll', type: 'checkbox' });
     appendControl(panel, { label: '防止自动滚动', key: 'stopAutoScrollWhileGenerating', type: 'checkbox' });
     appendControl(panel, { label: '代码自动换行', key: 'wrapCode', type: 'checkbox' });
-    appendControl(panel, { label: '隐藏 Ophel 版本提示', key: 'hideVersionNotice', type: 'checkbox' });
 
     const actions = document.createElement('div');
     actions.className = 'cgfc-actions';
@@ -11254,7 +11221,6 @@
       detectKnownLocalFonts();
       refreshFontSelects();
       syncPanelInputs(panel);
-      queueNoticeScan();
     });
 
     const closeButton = document.createElement('button');
@@ -11407,107 +11373,6 @@
     });
 
     observer.observe(document.documentElement, { childList: true, characterData: true, subtree: true });
-  }
-
-  function isVersionNoticeText(value) {
-    const text = normalizeText(value);
-    return text.length > 0 && versionNoticeText.some((part) => text.includes(part));
-  }
-
-  function cleanModeIsActive() {
-    return Boolean(document.getElementById(CLEAN_MODE_STYLE_ID));
-  }
-
-  function clearHiddenNotices() {
-    document.querySelectorAll(`.${HIDDEN_NOTICE_CLASS}`).forEach((element) => {
-      element.classList.remove(HIDDEN_NOTICE_CLASS);
-    });
-  }
-
-  function findNoticeContainer(start) {
-    let current = start instanceof HTMLElement ? start : start?.parentElement;
-    let best = current;
-
-    for (let depth = 0; current && depth < 7; depth += 1) {
-      if (current.matches('main, #thread, body, html')) break;
-
-      const text = normalizeText(current.textContent);
-      const rect = current.getBoundingClientRect();
-      if (isVersionNoticeText(text) && rect.height > 0 && rect.height <= 150 && text.length <= 260) {
-        best = current;
-        current = current.parentElement;
-        continue;
-      }
-
-      break;
-    }
-
-    return best;
-  }
-
-  function scanNotices(root) {
-    if (!settings.hideVersionNotice || !cleanModeIsActive()) {
-      clearHiddenNotices();
-      return;
-    }
-
-    const scanRoot = root instanceof Element ? root : document.querySelector('main') || document.body;
-    if (!scanRoot || !isVersionNoticeText(scanRoot.textContent)) return;
-
-    const walker = document.createTreeWalker(scanRoot, NodeFilter.SHOW_TEXT);
-    let node;
-    while ((node = walker.nextNode())) {
-      if (!isVersionNoticeText(node.nodeValue)) continue;
-      findNoticeContainer(node.parentElement)?.classList.add(HIDDEN_NOTICE_CLASS);
-    }
-  }
-
-  function queueNoticeScan(root) {
-    clearTimeout(noticeTimer);
-    noticeTimer = setTimeout(() => scanNotices(root), 100);
-  }
-
-  function startNoticeObserver() {
-    queueNoticeScan();
-
-    const observer = new MutationObserver((mutations) => {
-      let rootToScan = null;
-      let shouldClear = false;
-
-      for (const mutation of mutations) {
-        if (mutation.target instanceof Element && mutation.target.closest(`#${PANEL_ID}, #${TOGGLE_ID}`)) {
-          continue;
-        }
-
-        for (const node of mutation.addedNodes) {
-          if (!(node instanceof Element)) continue;
-
-          if (node.id === CLEAN_MODE_STYLE_ID || node.querySelector?.(`#${CLEAN_MODE_STYLE_ID}`)) {
-            rootToScan = document.querySelector('main') || document.body;
-            break;
-          }
-
-          if (isVersionNoticeText(node.textContent)) {
-            rootToScan = node;
-            break;
-          }
-        }
-
-        for (const node of mutation.removedNodes) {
-          if (node instanceof Element && (node.id === CLEAN_MODE_STYLE_ID || node.querySelector?.(`#${CLEAN_MODE_STYLE_ID}`))) {
-            shouldClear = true;
-            break;
-          }
-        }
-
-        if (rootToScan || shouldClear) break;
-      }
-
-      if (rootToScan) queueNoticeScan(rootToScan);
-      if (shouldClear || !cleanModeIsActive()) queueNoticeScan();
-    });
-
-    observer.observe(document.documentElement, { childList: true, subtree: true });
   }
 
   // These tokenizer helpers deliberately operate on strings only. Keeping the
@@ -12003,14 +11868,6 @@
       --cgfc-theme-overlay: rgba(0, 0, 0, .58);
     }
 
-    html[data-cgfc-scroll-fix],
-    html[data-cgfc-scroll-fix] body {
-      height: 100% !important;
-      overflow: hidden !important;
-      overflow-x: hidden !important;
-      overflow-y: hidden !important;
-    }
-
     html[data-cgfc-body-font] body,
     html[data-cgfc-body-font] main [data-message-author-role],
     html[data-cgfc-body-font] main .markdown,
@@ -12165,10 +12022,6 @@
       display: block;
       margin: .35em 0;
       text-align: center;
-    }
-
-    .${HIDDEN_NOTICE_CLASS} {
-      display: none !important;
     }
 
     .${HIDDEN_DISCLAIMER_CLASS} {
@@ -12484,7 +12337,6 @@
     if (!observersStarted) {
       observersStarted = true;
       startShellGuard();
-      startNoticeObserver();
       startDisclaimerObserver();
     }
   });
