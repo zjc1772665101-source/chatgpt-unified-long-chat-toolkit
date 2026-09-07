@@ -2763,6 +2763,19 @@
       const composerRect = composer.getBoundingClientRect();
       const maxShellHeight = Math.max(180, composerRect.height * 4.5);
       const maxTopDrift = Math.max(120, composerRect.height * 3);
+      const isReasonableShell = (element) => {
+        if (!(element instanceof Element)) return false;
+        const rect = element.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        const topDrift = Math.max(0, composerRect.top - rect.top);
+        return rect.height <= maxShellHeight && topDrift <= maxTopDrift;
+      };
+
+      // ChatGPT 当前页面会给真正的输入区外壳标记 data-composer-surface。
+      // 空输入框时没有 send button，优先认这个显式锚点，避免退到偏窄的编辑器内层。
+      const explicitSurface = composer.closest('[data-composer-surface="true"]');
+      if (isReasonableShell(explicitSurface)) return explicitSurface;
+
       const candidates = [];
       let node = composer.parentElement;
 
@@ -2779,12 +2792,20 @@
         if (rect.height > maxShellHeight || topDrift > maxTopDrift) continue;
 
         const radius = Number.parseFloat(getComputedStyle(node).borderRadius || '0') || 0;
+        const explicit = node.matches('[data-composer-surface="true"]');
         const semantic = node.matches('form[data-type*="composer" i], form[class*="composer" i], [data-testid*="composer" i]');
+        const genericForm = node.tagName === 'FORM';
         const containsSend = Boolean(sendButton && node.contains(sendButton));
+        const widthGain = Math.max(0, rect.width - composerRect.width);
         let score = 0;
-        if (containsSend) score += 8;
-        if (semantic) score += 6;
+        if (explicit) score += 20;
+        if (containsSend) score += 10;
+        if (semantic) score += 8;
+        else if (genericForm) score += 5;
         if (radius >= 12) score += 4;
+        // 真正的 composer 外壳通常比文本编辑区更宽，因为右侧还包含模型、语音/发送等控件。
+        // 在高度已受约束的前提下，适度奖励横向扩展，避免空输入框时锚到窄内层。
+        score += Math.min(7, widthGain / 55);
         score -= Math.min(4, topDrift / 40);
         score -= Math.min(3, Math.max(0, rect.height - composerRect.height) / 60);
         candidates.push({ node, score, depth });
