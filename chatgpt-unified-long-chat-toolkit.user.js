@@ -654,6 +654,7 @@
       this.summaryOffsetXAttr = 'data-cgpt-token-summary-offset-x';
       this.summaryOffsetYAttr = 'data-cgpt-token-summary-offset-y';
       this.summaryCompactAttr = 'data-cgpt-token-summary-compact-narrow';
+      this.summaryCompactAlwaysAttr = 'data-cgpt-token-summary-compact-always';
       this.summaryAvoidQueueAttr = 'data-cgpt-token-summary-avoid-queue';
       this.apiMaxAgeMs = 60000;
       this.domDebounceMs = 240;
@@ -708,6 +709,10 @@
 
     compactOnNarrow() {
       return this.isSubfeatureEnabled(this.summaryCompactAttr, true);
+    }
+
+    compactAlways() {
+      return this.isSubfeatureEnabled(this.summaryCompactAlwaysAttr, false);
     }
 
     avoidQueue() {
@@ -940,14 +945,14 @@
       style.textContent = `
         #${this.rootId} {
           position: fixed; left: 10px; top: 10px;
-          z-index: 2147482400; color: var(--cgfc-theme-text-primary, var(--text-primary, #161616));
+          z-index: 2147482400; color: var(--cgfc-token-summary-text-color, var(--cgfc-theme-text-primary, var(--text-primary, #161616)));
           font: 12px/1.35 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
           pointer-events: none;
         }
         #${this.rootId} .cgpt-token-pill {
           display: flex; align-items: center; gap: 7px; padding: 7px 10px;
-          border: 1px solid var(--cgfc-theme-border, color-mix(in srgb, currentColor 16%, transparent)); border-radius: 999px;
-          background: color-mix(in srgb, var(--cgfc-theme-surface-primary, var(--main-surface-primary, var(--bg-primary, #fff))) 92%, transparent); box-shadow: var(--cgfc-theme-shadow-soft, 0 4px 16px rgba(0,0,0,.10));
+          border: 1px solid var(--cgfc-token-summary-border-color, var(--cgfc-theme-border, color-mix(in srgb, currentColor 16%, transparent))); border-radius: 999px;
+          background: var(--cgfc-token-summary-background-color, color-mix(in srgb, var(--cgfc-theme-surface-primary, var(--main-surface-primary, var(--bg-primary, #fff))) 92%, transparent)); box-shadow: var(--cgfc-theme-shadow-soft, 0 4px 16px rgba(0,0,0,.10));
           backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
           cursor: default; user-select: none; white-space: nowrap; pointer-events: auto;
         }
@@ -1002,8 +1007,9 @@
       const title = `可见文本 Token 估算：输入 ≈${input}，输出 ≈${output}，可见上下文 ≈${context}。不包含系统指令、记忆、工具定义、隐藏推理等服务端上下文，因此不是官方 usage。`;
       pill?.setAttribute('title', title);
       pill?.setAttribute('aria-label', title);
-      const narrow = this.compactOnNarrow() && (window.visualViewport?.width || window.innerWidth || 0) <= 640;
-      root.dataset.compact = String(narrow);
+      const compact = this.compactAlways()
+        || (this.compactOnNarrow() && (window.visualViewport?.width || window.innerWidth || 0) <= 640);
+      root.dataset.compact = String(compact);
       this.schedulePosition();
     }
 
@@ -1087,7 +1093,7 @@
       const viewportBottom = viewportTop + viewportHeight;
       const edge = 10;
 
-      const compact = this.compactOnNarrow() && viewportWidth <= 640;
+      const compact = this.compactAlways() || (this.compactOnNarrow() && viewportWidth <= 640);
       root.dataset.compact = String(compact);
       const measured = root.getBoundingClientRect();
       const width = Math.max(1, measured.width);
@@ -9223,8 +9229,12 @@
     tokenSummaryPosition: 'auto',
     tokenSummaryOffsetX: 0,
     tokenSummaryOffsetY: 0,
+    tokenSummaryCompactAlways: false,
     tokenSummaryCompactOnNarrow: true,
     tokenSummaryAvoidQueue: true,
+    tokenSummaryTextColor: '#f4f4f4',
+    tokenSummaryBackgroundColor: '#212121',
+    tokenSummaryBorderColor: '#3f3f46',
   };
 
   // Appearance values are stored independently from whether the script is
@@ -9241,11 +9251,13 @@
     'toolboxTextColor', 'toolboxBackgroundColor', 'toolboxAccentColor', 'toolboxOpacity',
     'queueFont', 'queueFontSize', 'queueLineHeight', 'queuePanelWidth',
     'queueTextColor', 'queueBackgroundColor', 'queueAccentColor', 'queueOpacity',
+    'tokenSummaryTextColor', 'tokenSummaryBackgroundColor', 'tokenSummaryBorderColor',
   ]);
   const DEFAULT_DISABLED_OVERRIDE_KEYS = new Set([
     'normalColor', 'boldColor',
     'toolboxTextColor', 'toolboxBackgroundColor', 'toolboxAccentColor', 'toolboxOpacity',
     'queueTextColor', 'queueBackgroundColor', 'queueAccentColor', 'queueOpacity',
+    'tokenSummaryTextColor', 'tokenSummaryBackgroundColor', 'tokenSummaryBorderColor',
   ]);
   const overrideEnabledKey = (key) => `${key}Enabled`;
   for (const key of OVERRIDEABLE_SETTING_KEYS) {
@@ -9301,8 +9313,12 @@
     tokenSummaryPosition: 'select',
     tokenSummaryOffsetX: 'number',
     tokenSummaryOffsetY: 'number',
+    tokenSummaryCompactAlways: 'boolean',
     tokenSummaryCompactOnNarrow: 'boolean',
     tokenSummaryAvoidQueue: 'boolean',
+    tokenSummaryTextColor: 'color',
+    tokenSummaryBackgroundColor: 'color',
+    tokenSummaryBorderColor: 'color',
   };
   for (const key of OVERRIDEABLE_SETTING_KEYS) {
     settingTypes[overrideEnabledKey(key)] = 'boolean';
@@ -9875,8 +9891,12 @@
     root.setAttribute('data-cgpt-token-summary-position', normalizeSetting('tokenSummaryPosition', settings.tokenSummaryPosition));
     root.setAttribute('data-cgpt-token-summary-offset-x', String(normalizeSetting('tokenSummaryOffsetX', settings.tokenSummaryOffsetX)));
     root.setAttribute('data-cgpt-token-summary-offset-y', String(normalizeSetting('tokenSummaryOffsetY', settings.tokenSummaryOffsetY)));
+    root.toggleAttribute('data-cgpt-token-summary-compact-always', settings.tokenSummaryCompactAlways);
     root.toggleAttribute('data-cgpt-token-summary-compact-narrow', settings.tokenSummaryCompactOnNarrow);
     root.toggleAttribute('data-cgpt-token-summary-avoid-queue', settings.tokenSummaryAvoidQueue);
+    setOrRemove('--cgfc-token-summary-text-color', enabled('tokenSummaryTextColor'), normalizeSetting('tokenSummaryTextColor', settings.tokenSummaryTextColor));
+    setOrRemove('--cgfc-token-summary-background-color', enabled('tokenSummaryBackgroundColor'), normalizeSetting('tokenSummaryBackgroundColor', settings.tokenSummaryBackgroundColor));
+    setOrRemove('--cgfc-token-summary-border-color', enabled('tokenSummaryBorderColor'), normalizeSetting('tokenSummaryBorderColor', settings.tokenSummaryBorderColor));
     document.dispatchEvent(new CustomEvent('cgpt-unified-ui-settings-change'));
     return true;
   }
@@ -11184,11 +11204,16 @@
     row = createRow(statsGroup);
     appendControl(row, { label: '水平偏移 px', key: 'tokenSummaryOffsetX', type: 'number', min: -600, max: 600, step: 1 });
     appendControl(row, { label: '垂直偏移 px', key: 'tokenSummaryOffsetY', type: 'number', min: -600, max: 600, step: 1 });
-    appendControl(statsGroup, { label: '窄屏自动使用紧凑格式（6/235/2.4k）', key: 'tokenSummaryCompactOnNarrow', type: 'checkbox' });
+    appendControl(statsGroup, { label: '始终使用紧凑格式（6/235/2.4k）', key: 'tokenSummaryCompactAlways', type: 'checkbox' });
+    appendControl(statsGroup, { label: '窄屏自动使用紧凑格式', key: 'tokenSummaryCompactOnNarrow', type: 'checkbox' });
     appendControl(statsGroup, { label: '自动避让发送队列', key: 'tokenSummaryAvoidQueue', type: 'checkbox' });
+    row = createRow(statsGroup);
+    appendControl(row, { label: '总览文字颜色', key: 'tokenSummaryTextColor', type: 'color' });
+    appendControl(row, { label: '总览背景颜色', key: 'tokenSummaryBackgroundColor', type: 'color' });
+    appendControl(statsGroup, { label: '总览边框颜色', key: 'tokenSummaryBorderColor', type: 'color' });
     const tokenStatsHint = document.createElement('p');
     tokenStatsHint.className = 'cgfc-hint';
-    tokenStatsHint.textContent = '统计当前活动分支中可见的用户/助手文本。总览依次表示本轮输入、输出和可见上下文；窄屏紧凑格式为“输入/输出/上下文”。系统指令、记忆、工具定义、隐藏推理等不可见内容不会计入，因此它只是近似值，不是官方 usage。';
+    tokenStatsHint.textContent = '统计当前活动分支中可见的用户/助手文本。总览依次表示本轮输入、输出和可见上下文；开启“始终紧凑”后宽屏也显示为“输入/输出/上下文”。三个颜色项关闭脚本覆盖时继续跟随 ChatGPT 明暗主题。系统指令、记忆、工具定义、隐藏推理等不可见内容不会计入，因此它只是近似值，不是官方 usage。';
     statsGroup.appendChild(tokenStatsHint);
 
     appendControl(panel, { label: '防止自动滚动', key: 'stopAutoScrollWhileGenerating', type: 'checkbox' });
