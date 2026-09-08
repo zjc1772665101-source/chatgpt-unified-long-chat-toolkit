@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT 长对话统一工具箱（性能·导航·提示词·导出·排版）
 // @namespace    local.codex.chatgpt.unified
-// @version      1.5.1
-// @description  ChatGPT 长对话性能、导航、提示词、导出与排版工具箱；v1.5.1 新增可见文本 Token 估算，并让主要插件界面自动跟随 ChatGPT 浅色/深色主题。
+// @version      1.6.4
+// @description  ChatGPT 长对话性能、导航、提示词、导出与排版工具箱；v1.6.4 重做发送队列输入区并统一细节交互与视觉。
 // @author       Codex；含 Alex S Hamilton 的 ChatGPT Lazy Chat++（GPL-3.0-or-later）
 // @homepageURL  https://github.com/zjc1772665101-source/chatgpt-unified-long-chat-toolkit
 // @supportURL   https://github.com/zjc1772665101-source/chatgpt-unified-long-chat-toolkit/issues
@@ -33,7 +33,7 @@
   const PROMPT_STORAGE_KEY = 'cgpt-unified-prompt-library-v1';
   const runtime = globalThis[RUNTIME_KEY] || (globalThis[RUNTIME_KEY] = {});
 
-  runtime.version = '1.5.1';
+  runtime.version = '1.6.4';
   runtime.lazy = runtime.lazy || null;
   runtime.navigationLeaseTimer = 0;
   runtime.beginNavigationLease = (duration = 3200) => {
@@ -1971,6 +1971,142 @@
       return Boolean(editor && wanted && (editor === wanted || editor.includes(wanted) || wanted.includes(editor)));
     }
 
+    findComposerForm(composer = this.findComposer()) {
+      if (!(composer instanceof Element)) return null;
+      return composer.closest('form')
+        || composer.closest('[data-composer-surface]')?.closest('form')
+        || null;
+    }
+
+    findUploadInput(composer = this.findComposer()) {
+      const form = this.findComposerForm(composer);
+      if (!form) return null;
+      const local = form.querySelector([
+        '#upload-files',
+        'input[type="file"][data-photo-upload-enabled="true"]',
+        'input[type="file"]:not([accept])',
+      ].join(', '));
+      if (local instanceof HTMLInputElement && local.type === 'file' && !local.disabled) return local;
+
+      // Only fall back to ChatGPT's known native upload hooks. Avoid a global
+      // generic input[type=file] lookup because the queue UI itself owns one.
+      const nativeGlobal = document.querySelector('#upload-files, input[type="file"][data-photo-upload-enabled="true"]');
+      if (nativeGlobal instanceof HTMLInputElement && nativeGlobal.type === 'file' && !nativeGlobal.disabled) return nativeGlobal;
+      return null;
+    }
+
+    getComposerAttachmentNames(composer = this.findComposer()) {
+      const form = this.findComposerForm(composer);
+      if (!form) return [];
+      const names = new Set();
+      form.querySelectorAll('input[type="file"]').forEach((input) => {
+        Array.from(input.files || []).forEach((file) => {
+          if (file?.name) names.add(String(file.name));
+        });
+      });
+      form.querySelectorAll('button[aria-label]').forEach((button) => {
+        const label = String(button.getAttribute('aria-label') || '');
+        const match = label.match(/(?:移除文件\s*\d*[:：]?|remove\s+file\s*\d*[:：]?)[\s]*(.+)$/i);
+        if (match?.[1]) names.add(match[1].trim());
+      });
+      return [...names];
+    }
+
+    hasComposerAttachments(composer = this.findComposer()) {
+      const form = this.findComposerForm(composer);
+      if (!form) return false;
+      if (this.getComposerAttachmentNames(composer).length) return true;
+      return Boolean(form.querySelector(
+        'button[aria-label*="移除文件" i], button[aria-label*="remove file" i], [data-testid*="attachment" i]'
+      ));
+    }
+
+    hasComposerPayload(composer = this.findComposer()) {
+      return Boolean(
+        this.getComposerText(composer).replace(/[\u200B\u200C\u200D\uFEFF]/g, '').trim()
+        || this.hasComposerAttachments(composer)
+      );
+    }
+
+    composerMatchesQueueItem(item, composer = this.findComposer()) {
+      if (!item || !composer) return false;
+      const text = String(item.content || '').trim();
+      const normalize = (value) => String(value || '')
+        .replace(/[\u200B\u200C\u200D\uFEFF]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const editor = normalize(this.getComposerText(composer));
+      const wanted = normalize(text);
+      const textMatches = !wanted || Boolean(editor && (editor === wanted || editor.includes(wanted) || wanted.includes(editor)));
+      const wantedNames = (Array.isArray(item.attachments) ? item.attachments : [])
+        .map((attachment) => String(attachment?.name || attachment?.file?.name || '').trim())
+        .filter(Boolean);
+      if (!wantedNames.length) return textMatches;
+      const present = this.getComposerAttachmentNames(composer);
+      const attachmentsMatch = wantedNames.every((name) => present.includes(name));
+      return textMatches && attachmentsMatch;
+    }
+
+    async attachFiles(files, options = {}) {
+      const normalized = Array.from(files || []).filter((file) => file instanceof File);
+      if (!normalized.length) return true;
+      const composer = this.findComposer();
+      const input = this.findUploadInput(composer);
+      if (!composer || !input || typeof DataTransfer !== 'function') return false;
+
+      const transfer = new DataTransfer();
+      for (const file of normalized) transfer.items.add(file);
+      try {
+        input.files = transfer.files;
+      } catch {
+        return false;
+      }
+      const eventInit = { bubbles: true, composed: true };
+      input.dispatchEvent(new Event('input', eventInit));
+      input.dispatchEvent(new Event('change', eventInit));
+
+      const timeout = Math.max(5000, Number(options.timeout || 120000));
+      const deadline = Date.now() + timeout;
+      const wantedNames = normalized.map((file) => file.name);
+      let readySince = 0;
+      while (Date.now() < deadline) {
+        const currentComposer = this.findComposer();
+        const form = this.findComposerForm(currentComposer);
+        if (!form) return false;
+        const formText = String(form.innerText || form.textContent || '');
+        const labels = Array.from(form.querySelectorAll('button[aria-label]'), (button) => String(button.getAttribute('aria-label') || ''));
+        const visible = wantedNames.every((name) => formText.includes(name) || labels.some((label) => label.includes(name)));
+        const alertText = Array.from(document.querySelectorAll('[role="alert"]'), (node) => String(node.textContent || '')).join('\n');
+        const obviousFailure = /(?:上传失败|无法上传|不支持.{0,8}(?:文件|格式)|upload failed|couldn't upload|cannot upload|unsupported.{0,8}(?:file|format))/i.test(`${formText}\n${alertText}`);
+        if (obviousFailure) return false;
+        const sendReady = Boolean(this.findSendButton(currentComposer));
+        if (visible && sendReady) {
+          if (!readySince) readySince = Date.now();
+          if (Date.now() - readySince >= 500) return true;
+        } else {
+          readySince = 0;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 180));
+      }
+      return false;
+    }
+
+    async clearComposerAttachments() {
+      const composer = this.findComposer();
+      const form = this.findComposerForm(composer);
+      if (!form) return;
+      const buttons = Array.from(form.querySelectorAll(
+        'button[aria-label*="移除文件" i], button[aria-label*="remove file" i]'
+      ));
+      for (const button of buttons) {
+        try { button.click(); } catch {}
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      form.querySelectorAll('input[type="file"]').forEach((input) => {
+        try { input.value = ''; } catch {}
+      });
+    }
+
     findSendButton(composer = this.findComposer()) {
       const selectors = [
         '#composer-submit-button:not([data-testid="stop-button"])',
@@ -1996,7 +2132,7 @@
 
     async submitComposer() {
       const composer = this.findComposer();
-      if (!composer || !this.getComposerText(composer).trim()) return false;
+      if (!composer || !this.hasComposerPayload(composer)) return false;
       const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       let button = null;
       for (let attempt = 0; attempt < 24; attempt += 1) {
@@ -2025,7 +2161,7 @@
       for (let attempt = 0; attempt < 30; attempt += 1) {
         await wait(100);
         if (runtime.isGenerating?.()) return true;
-        if (!this.getComposerText(this.findComposer()).replace(/[\u200B\u200C\u200D\uFEFF]/g, '').trim()) return true;
+        if (!this.hasComposerPayload(this.findComposer())) return true;
       }
       return false;
     }
@@ -2098,6 +2234,7 @@
       this.runtime = runtimeRef;
       this.items = [];
       this.isPaused = false;
+      this.editingItemId = '';
       this.listeners = new Set();
       this.timer = 0;
       this.idleCount = 0;
@@ -2113,8 +2250,15 @@
 
     snapshot() {
       return {
-        items: this.items.map((item) => ({ ...item, metadata: item.metadata ? { ...item.metadata } : undefined })),
+        items: this.items.map((item) => ({
+          ...item,
+          metadata: item.metadata ? { ...item.metadata } : undefined,
+          attachments: Array.isArray(item.attachments)
+            ? item.attachments.map((attachment) => ({ ...attachment }))
+            : [],
+        })),
         isPaused: this.isPaused,
+        editingItemId: this.editingItemId,
         isProcessing: this.items.some((item) => item.status === 'sending'),
         awaitingResponse: Boolean(this.awaitingResponse),
       };
@@ -2134,14 +2278,40 @@
       });
     }
 
-    enqueue(content, metadata = undefined) {
+    normalizeAttachments(values) {
+      const FileCtor = globalThis.File;
+      const source = Array.isArray(values) ? values : Array.from(values || []);
+      const normalized = [];
+      for (const value of source) {
+        const file = value?.file || value;
+        if (!FileCtor || !(file instanceof FileCtor)) continue;
+        normalized.push({
+          id: value?.id || `attachment-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          file,
+          name: String(file.name || value?.name || '附件'),
+          type: String(file.type || value?.type || ''),
+          size: Number(file.size || value?.size || 0),
+          lastModified: Number(file.lastModified || value?.lastModified || 0),
+        });
+      }
+      return normalized;
+    }
+
+    hasPayload(content, attachments = []) {
+      return Boolean(String(content || '').trim() || this.normalizeAttachments(attachments).length);
+    }
+
+    enqueue(content, metadata = undefined, attachments = undefined) {
       const text = String(content || '').trim();
-      if (!text) return null;
+      const normalizedAttachments = this.normalizeAttachments(attachments);
+      if (!text && !normalizedAttachments.length) return null;
       const item = {
         id: `queue-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         content: text,
+        attachments: normalizedAttachments,
         createdAt: Date.now(),
         status: 'pending',
+        error: '',
         metadata: {
           ...(metadata && typeof metadata === 'object' ? metadata : {}),
           conversationId: metadata?.conversationId ?? this.getConversationId(),
@@ -2158,30 +2328,77 @@
       for (const value of Array.isArray(values) ? values : []) {
         const item = typeof value === 'string'
           ? this.enqueue(value)
-          : this.enqueue(value?.content, value?.metadata);
+          : this.enqueue(value?.content, value?.metadata, value?.attachments);
         if (item) created.push(item);
       }
       return created;
     }
 
+    beginEdit(id) {
+      const item = this.items.find((candidate) => candidate.id === id);
+      if (!item || item.status === 'sending' || this.isDispatching) return false;
+      this.editingItemId = id;
+      this.idleCount = 0;
+      this.emit();
+      return true;
+    }
+
+    cancelEdit(id = this.editingItemId) {
+      if (!this.editingItemId || (id && this.editingItemId !== id)) return false;
+      this.editingItemId = '';
+      this.idleCount = 0;
+      this.emit();
+      this.start();
+      return true;
+    }
+
+    update(id, content, attachments = undefined) {
+      const item = this.items.find((candidate) => candidate.id === id);
+      if (!item || item.status === 'sending' || this.isDispatching) return false;
+      const text = String(content || '').trim();
+      const normalizedAttachments = this.normalizeAttachments(
+        attachments === undefined ? item.attachments : attachments
+      );
+      if (!text && !normalizedAttachments.length) return false;
+      item.content = text;
+      item.attachments = normalizedAttachments;
+      item.status = 'pending';
+      item.error = '';
+      item.submitBaseline = '';
+      if (this.editingItemId === id) this.editingItemId = '';
+      this.idleCount = 0;
+      this.emit();
+      this.start();
+      return true;
+    }
+
     remove(id) {
+      const item = this.items.find((candidate) => candidate.id === id);
+      if (item?.status === 'sending') return false;
       const before = this.items.length;
       this.items = this.items.filter((item) => item.id !== id);
+      if (this.editingItemId === id) this.editingItemId = '';
       if (this.items.length !== before) this.emit();
+      return this.items.length !== before;
     }
 
     clear() {
-      this.items = [];
+      this.items = this.items.filter((item) => item.status === 'sending');
+      this.editingItemId = '';
       this.idleCount = 0;
       this.emit();
+      return true;
     }
 
     retry(id) {
       const item = this.items.find((candidate) => candidate.id === id);
-      if (!item) return false;
+      if (!item || item.status === 'sending') return false;
       item.status = 'pending';
+      item.error = '';
+      item.submitBaseline = '';
       this.idleCount = 0;
       this.emit();
+      this.start();
       return true;
     }
 
@@ -2190,6 +2407,7 @@
       this.isPaused = true;
       this.idleCount = 0;
       this.emit();
+      if (!this.awaitingResponse && !this.items.some((item) => item.status === 'sending')) this.stop();
     }
 
     resume() {
@@ -2207,6 +2425,7 @@
 
     start() {
       if (this.timer) return;
+      if (this.isPaused && !this.awaitingResponse && !this.items.some((item) => item.status === 'sending')) return;
       this.timer = window.setInterval(() => this.tick(), this.POLL_INTERVAL);
       window.setTimeout(() => this.tick(), 80);
     }
@@ -2320,6 +2539,10 @@
     async tick() {
       if (this.isDispatching) return;
       if (this.updatePostSubmitWait()) return;
+      if (this.editingItemId) {
+        this.idleCount = 0;
+        return;
+      }
       if (this.isPaused) {
         this.idleCount = 0;
         return;
@@ -2333,6 +2556,9 @@
       const pending = this.items.find((item) => item.status === 'pending');
       if (!pending) {
         this.idleCount = 0;
+        if (!this.awaitingResponse && !this.items.some((item) => item.status === 'sending' || item.status === 'pending')) {
+          this.stop();
+        }
         return;
       }
 
@@ -2345,7 +2571,7 @@
         this.idleCount = 0;
         return;
       }
-      if (promptLibrary.hasComposerContent?.()) {
+      if (promptLibrary.hasComposerPayload?.()) {
         this.idleCount = 0;
         return;
       }
@@ -2365,20 +2591,44 @@
       if (!promptLibrary) return;
       this.isDispatching = true;
       item.status = 'sending';
+      item.error = '';
       this.emit();
       try {
-        if (this.isGenerating() || promptLibrary.hasComposerContent()) {
+        if (this.isGenerating() || promptLibrary.hasComposerPayload()) {
           item.status = 'pending';
           return;
         }
-        const inserted = promptLibrary.insertIntoComposer(item.content, { silent: true });
-        if (!inserted) {
+
+        const queuedAttachments = Array.isArray(item.attachments) ? item.attachments : [];
+        const attachmentFiles = queuedAttachments
+          .map((attachment) => attachment?.file)
+          .filter((file) => file instanceof File);
+        if (queuedAttachments.length && attachmentFiles.length !== queuedAttachments.length) {
           item.status = 'failed';
+          item.error = '附件对象已失效，请编辑此消息并重新选择附件';
+          return;
+        }
+        if (attachmentFiles.length) {
+          const attached = await promptLibrary.attachFiles(attachmentFiles);
+          if (!attached) {
+            await promptLibrary.clearComposerAttachments?.();
+            item.status = 'failed';
+            item.error = '附件上传未完成';
+            return;
+          }
+        }
+
+        const text = String(item.content || '').trim();
+        const inserted = !text || promptLibrary.insertIntoComposer(text, { silent: true });
+        if (!inserted) {
+          await promptLibrary.clearComposerAttachments?.();
+          item.status = 'failed';
+          item.error = '无法写入输入框';
           return;
         }
         item.submitBaseline = this.getLatestUserTurnSignature();
         const submitted = await promptLibrary.submitComposer();
-        if (submitted || this.hasUserTurnAdvanced(item) || !promptLibrary.composerContains(item.content)) {
+        if (submitted || this.hasUserTurnAdvanced(item) || !promptLibrary.composerMatchesQueueItem(item)) {
           this.completeItem(item.id);
           this.startPostSubmitWait();
         } else {
@@ -2388,7 +2638,8 @@
         }
       } catch (error) {
         console.error('[发送队列] 发送失败：', error);
-        item.status = promptLibrary.composerContains(item.content) ? 'sending' : 'pending';
+        item.error = String(error?.message || error || '发送失败');
+        item.status = promptLibrary.composerMatchesQueueItem(item) ? 'sending' : 'failed';
       } finally {
         this.isDispatching = false;
         this.emit();
@@ -2407,7 +2658,7 @@
         this.idleCount = 0;
         return;
       }
-      if (this.hasUserTurnAdvanced(item) || !promptLibrary.composerContains(item.content)) {
+      if (this.hasUserTurnAdvanced(item) || !promptLibrary.composerMatchesQueueItem(item)) {
         this.completeItem(item.id);
         this.startPostSubmitWait();
         return;
@@ -2419,12 +2670,13 @@
       try {
         if (!item.submitBaseline) item.submitBaseline = this.getLatestUserTurnSignature();
         const submitted = await promptLibrary.submitComposer();
-        if (submitted || this.hasUserTurnAdvanced(item) || !promptLibrary.composerContains(item.content)) {
+        if (submitted || this.hasUserTurnAdvanced(item) || !promptLibrary.composerMatchesQueueItem(item)) {
           this.completeItem(item.id);
           this.startPostSubmitWait();
         }
       } catch (error) {
         console.error('[发送队列] 重试发送失败：', error);
+        item.error = String(error?.message || error || '重试失败');
       } finally {
         this.isDispatching = false;
         this.emit();
@@ -2445,13 +2697,17 @@
       this.clearButton = null;
       this.list = null;
       this.input = null;
+      this.draftAttachmentList = null;
       this.enqueueButton = null;
       this.status = null;
+      this.draftAttachments = [];
+      this.editDraft = null;
       this.isOpen = false;
       this.unsubscribe = null;
       this.observer = null;
       this.resizeObserver = null;
       this.observedShell = null;
+      this.neumorphicShell = null;
       this.positionRaf = 0;
       this.heartbeat = 0;
       this.started = false;
@@ -2486,7 +2742,9 @@
         this.observer.observe(document.documentElement, { childList: true, subtree: true });
       };
       observe();
-      this.heartbeat = window.setInterval(() => this.schedulePosition(), 1200);
+      // ResizeObserver + DOM mutations handle normal movement; this is only a
+      // low-frequency fallback for route/layout changes that do not emit either.
+      this.heartbeat = window.setInterval(() => this.schedulePosition(), 3000);
       window.setTimeout(() => {
         this.ensureRoot();
         this.render();
@@ -2508,31 +2766,68 @@
         .cgpt-queue-capsule svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
         .cgpt-queue-capsule-badge { display: inline-flex; min-width: 17px; height: 17px; padding: 0 5px; align-items: center; justify-content: center; border-radius: 999px; background: var(--cgfc-queue-accent-color, #6d5dfc); color: #fff; font-size: .833em; font-weight: 700; }
         .cgpt-queue-capsule-badge[hidden] { display: none !important; }
-        .cgpt-queue-panel { display: flex; width: var(--cgfc-queue-panel-width, 420px); max-width: calc(100vw - 20px); flex-direction: column; overflow: hidden; border: 1px solid var(--cgfc-theme-border, var(--border-light, rgba(0,0,0,.14))); border-radius: 14px; background: var(--cgfc-queue-panel-background, var(--cgfc-theme-surface-primary, var(--main-surface-primary, var(--bg-primary, #fff)))); color: var(--cgfc-queue-text-color, var(--cgfc-theme-text-primary, var(--text-primary, #161616))); box-shadow: var(--cgfc-theme-shadow-strong, 0 18px 48px rgba(0,0,0,.18)); font-size: var(--cgfc-queue-font-size, 12px); line-height: var(--cgfc-queue-line-height, 1.4); color-scheme: var(--cgfc-color-scheme, light); }
+        .cgpt-queue-panel { display: flex; width: var(--cgfc-queue-panel-width, 420px); max-width: calc(100vw - 20px); flex-direction: column; overflow: hidden; border: 1px solid var(--cgfc-theme-border, var(--border-light, rgba(0,0,0,.14))); border-radius: 18px; background: var(--cgfc-queue-panel-background, var(--cgfc-theme-surface-primary, var(--main-surface-primary, var(--bg-primary, #fff)))); color: var(--cgfc-queue-text-color, var(--cgfc-theme-text-primary, var(--text-primary, #161616))); box-shadow: var(--cgfc-theme-shadow-strong, 0 18px 48px rgba(0,0,0,.18)); font-size: var(--cgfc-queue-font-size, 12px); line-height: var(--cgfc-queue-line-height, 1.4); color-scheme: var(--cgfc-color-scheme, light); }
         .cgpt-queue-panel[hidden] { display: none !important; }
-        .cgpt-queue-panel-header { display: flex; min-height: 45px; padding: 8px 10px 8px 12px; align-items: center; gap: 8px; border-bottom: 1px solid var(--cgfc-theme-border, var(--border-light, rgba(0,0,0,.1))); }
+        .cgpt-queue-panel-header { display: flex; min-height: 48px; padding: 9px 11px 9px 14px; align-items: center; gap: 8px; border-bottom: 1px solid color-mix(in srgb, var(--cgfc-theme-border, var(--border-light, rgba(0,0,0,.1))) 76%, transparent); }
         .cgpt-queue-panel-title { margin-right: auto; font-size: 1.083em; font-weight: 700; }
-        .cgpt-queue-panel-actions { display: flex; gap: 3px; }
-        .cgpt-queue-icon-btn { display: inline-grid; min-width: 29px; height: 29px; padding: 0 7px; place-items: center; border: 0; border-radius: 8px; background: transparent; color: var(--cgfc-queue-text-color, var(--cgfc-theme-text-secondary, var(--text-secondary, #666))); cursor: pointer; font: inherit; font-size: .917em; }
+        .cgpt-queue-panel-actions { display: flex; gap: 4px; align-items: center; }
+        .cgpt-queue-icon-btn { display: inline-grid; min-width: 30px; height: 30px; padding: 0 8px; place-items: center; border: 1px solid transparent; border-radius: 9px; background: transparent; color: var(--cgfc-queue-text-color, var(--cgfc-theme-text-secondary, var(--text-secondary, #666))); cursor: pointer; font: inherit; font-size: .917em; transition: background 120ms ease, color 120ms ease, border-color 120ms ease, transform 120ms ease; }
+        .cgpt-queue-icon-btn[data-icon-only="true"] { width: 30px; min-width: 30px; padding: 0; }
+        .cgpt-queue-icon-btn svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
         .cgpt-queue-icon-btn:hover { background: var(--cgfc-theme-surface-secondary, var(--main-surface-secondary, var(--bg-secondary, #eee))); color: var(--cgfc-theme-text-primary, var(--text-primary, #161616)); }
-        .cgpt-queue-list { min-height: 38px; max-height: 190px; overflow-y: auto; padding: 8px; scrollbar-width: thin; }
-        .cgpt-queue-empty { padding: 12px 8px; color: var(--cgfc-queue-muted-color, var(--cgfc-theme-text-tertiary, var(--text-tertiary, #888))); font-size: 1em; text-align: center; }
-        .cgpt-queue-row { display: grid; grid-template-columns: 23px minmax(0, 1fr) auto; gap: 7px; align-items: center; margin-bottom: 5px; padding: 7px; border-radius: 9px; background: color-mix(in srgb, var(--cgfc-theme-surface-secondary, var(--main-surface-secondary, #eee)) 48%, transparent); }
+        .cgpt-queue-icon-btn:active { transform: scale(.97); }
+        .cgpt-queue-icon-btn:disabled { opacity: .35; cursor: default; }
+        .cgpt-queue-list { min-height: 42px; max-height: 270px; overflow-y: auto; padding: 9px 10px 7px; scrollbar-width: thin; scrollbar-color: color-mix(in srgb, currentColor 18%, transparent) transparent; }
+        .cgpt-queue-list::-webkit-scrollbar { width: 6px; }
+        .cgpt-queue-list::-webkit-scrollbar-track { background: transparent; }
+        .cgpt-queue-list::-webkit-scrollbar-thumb { border-radius: 999px; background: color-mix(in srgb, currentColor 16%, transparent); }
+        .cgpt-queue-empty { padding: 18px 10px; color: var(--cgfc-queue-muted-color, var(--cgfc-theme-text-tertiary, var(--text-tertiary, #888))); font-size: .95em; text-align: center; }
+        .cgpt-queue-row { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 8px; align-items: start; margin-bottom: 6px; padding: 9px; border: 1px solid transparent; border-radius: 12px; background: color-mix(in srgb, var(--cgfc-theme-surface-secondary, var(--main-surface-secondary, #eee)) 42%, transparent); transition: background 120ms ease, border-color 120ms ease; }
         .cgpt-queue-row[data-status="sending"] { outline: 1px solid color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 42%, transparent); }
         .cgpt-queue-row[data-status="failed"] { outline: 1px solid color-mix(in srgb, #dc2626 40%, transparent); }
-        .cgpt-queue-index { display: grid; width: 22px; height: 22px; place-items: center; border-radius: 7px; background: var(--cgfc-theme-surface-primary, var(--main-surface-primary, #fff)); color: var(--cgfc-queue-muted-color, var(--cgfc-theme-text-secondary, var(--text-secondary, #666))); font-size: .833em; font-weight: 700; }
+        .cgpt-queue-index { display: grid; width: 21px; height: 21px; place-items: center; border-radius: 999px; background: color-mix(in srgb, var(--cgfc-theme-surface-primary, var(--main-surface-primary, #fff)) 88%, transparent); color: var(--cgfc-queue-muted-color, var(--cgfc-theme-text-secondary, var(--text-secondary, #666))); font-size: .78em; font-weight: 700; }
         .cgpt-queue-main { min-width: 0; }
-        .cgpt-queue-text { overflow: hidden; color: var(--cgfc-queue-text-color, var(--cgfc-theme-text-primary, var(--text-primary, #161616))); font-size: 1em; line-height: inherit; text-overflow: ellipsis; white-space: nowrap; }
-        .cgpt-queue-item-status { margin-top: 2px; color: var(--cgfc-queue-muted-color, var(--cgfc-theme-text-tertiary, var(--text-tertiary, #888))); font-size: .833em; }
-        .cgpt-queue-row-actions { display: flex; gap: 2px; }
-        .cgpt-queue-row-actions button { width: 25px; height: 25px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--cgfc-theme-text-tertiary, var(--text-tertiary, #777)); cursor: pointer; }
+        .cgpt-queue-text { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; color: var(--cgfc-queue-text-color, var(--cgfc-theme-text-primary, var(--text-primary, #161616))); font-size: 1em; line-height: 1.45; overflow-wrap: anywhere; white-space: normal; }
+        .cgpt-queue-attachments { display: flex; min-width: 0; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+        .cgpt-queue-attachments:empty { display: none; }
+        .cgpt-queue-attachment { display: inline-flex; min-width: 0; max-width: 100%; height: 25px; padding: 0 8px; align-items: center; gap: 5px; border: 1px solid color-mix(in srgb, var(--cgfc-theme-border, rgba(127,127,127,.25)) 58%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--cgfc-theme-surface-primary, #fff) 82%, transparent); color: var(--cgfc-queue-muted-color, var(--cgfc-theme-text-secondary, var(--text-secondary, #666))); font-size: .81em; }
+        .cgpt-queue-attachment-icon { display: inline-grid; width: 14px; height: 14px; flex: none; place-items: center; }
+        .cgpt-queue-attachment-icon svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+        .cgpt-queue-attachment-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .cgpt-queue-attachment-remove { display: inline-grid; width: 16px; height: 16px; padding: 0; flex: none; place-items: center; border: 0; border-radius: 50%; background: transparent; color: inherit; cursor: pointer; font: inherit; }
+        .cgpt-queue-attachment-remove svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; }
+        .cgpt-queue-attachment-remove:hover { background: color-mix(in srgb, currentColor 12%, transparent); }
+        .cgpt-queue-item-status { display: inline-flex; margin-top: 4px; color: var(--cgfc-queue-muted-color, var(--cgfc-theme-text-tertiary, var(--text-tertiary, #888))); font-size: .79em; }
+        .cgpt-queue-row[data-status="failed"] .cgpt-queue-item-status { color: color-mix(in srgb, #ef4444 76%, currentColor 24%); }
+        .cgpt-queue-row[data-status="sending"] .cgpt-queue-item-status { color: color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 72%, currentColor 28%); }
+        .cgpt-queue-row-actions { display: flex; gap: 2px; align-items: center; }
+        .cgpt-queue-row-actions button { display: inline-grid; width: 27px; height: 27px; padding: 0; place-items: center; border: 0; border-radius: 8px; background: transparent; color: var(--cgfc-theme-text-tertiary, var(--text-tertiary, #777)); cursor: pointer; transition: background 120ms ease, color 120ms ease, transform 120ms ease; }
         .cgpt-queue-row-actions button:hover { background: var(--cgfc-theme-surface-primary, var(--main-surface-primary, #fff)); color: var(--cgfc-theme-text-primary, var(--text-primary, #161616)); }
-        .cgpt-queue-compose { display: flex; gap: 7px; padding: 9px 10px; align-items: flex-end; border-top: 1px solid var(--cgfc-theme-border, var(--border-light, rgba(0,0,0,.1))); }
-        .cgpt-queue-compose textarea { min-width: 0; min-height: 38px; max-height: 112px; flex: 1; padding: 8px 10px; resize: vertical; border: 1px solid var(--cgfc-theme-border, var(--border-light, rgba(0,0,0,.15))); border-radius: 9px; background: var(--cgfc-theme-surface-primary, var(--main-surface-primary, #fff)); color: var(--cgfc-queue-text-color, var(--cgfc-theme-text-primary, var(--text-primary, #161616))); font: inherit; font-size: 1em; line-height: inherit; outline: none; color-scheme: var(--cgfc-color-scheme, light); }
-        .cgpt-queue-compose textarea:focus { border-color: color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 60%, var(--cgfc-theme-border, var(--border-light, rgba(0,0,0,.15)))); box-shadow: 0 0 0 3px color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 12%, transparent); }
-        .cgpt-queue-enqueue { width: 38px; height: 38px; flex: none; border: 0; border-radius: 50%; background: var(--cgfc-queue-accent-color, #6d5dfc); color: #fff; cursor: pointer; font-size: 17px; line-height: 1; }
-        .cgpt-queue-enqueue:disabled { opacity: .45; cursor: default; }
-        .cgpt-queue-footer { display: flex; min-height: 26px; padding: 0 11px 8px; align-items: center; gap: 6px; color: var(--cgfc-queue-muted-color, var(--cgfc-theme-text-tertiary, var(--text-tertiary, #888))); font-size: .833em; }
+        .cgpt-queue-row-actions button:active { transform: scale(.94); }
+        .cgpt-queue-row-actions button:disabled { opacity: .28; cursor: default; }
+        .cgpt-queue-row-actions svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
+        .cgpt-queue-edit-text { box-sizing: border-box; width: 100%; min-height: 48px; max-height: 140px; padding: 9px 10px; resize: none; overflow-y: hidden; scrollbar-width: none; border: 1px solid var(--cgfc-theme-border, var(--border-light, rgba(0,0,0,.15))); border-radius: 10px; background: var(--cgfc-theme-surface-primary, var(--main-surface-primary, #fff)); color: var(--cgfc-queue-text-color, var(--cgfc-theme-text-primary, var(--text-primary, #161616))); font: inherit; line-height: 1.45; outline: none; }
+        .cgpt-queue-edit-text::-webkit-scrollbar { display: none; }
+        .cgpt-queue-edit-tools { display: flex; gap: 5px; margin-top: 6px; align-items: center; }
+        .cgpt-queue-mini-btn { min-height: 25px; padding: 3px 7px; border: 1px solid var(--cgfc-theme-border, rgba(127,127,127,.22)); border-radius: 7px; background: transparent; color: var(--cgfc-queue-muted-color, var(--cgfc-theme-text-secondary, #666)); cursor: pointer; font: inherit; font-size: .833em; }
+        .cgpt-queue-mini-btn:hover { background: var(--cgfc-theme-surface-primary, var(--main-surface-primary, #fff)); color: var(--cgfc-theme-text-primary, var(--text-primary, #161616)); }
+        .cgpt-queue-compose { display: flex; flex-direction: column; gap: 7px; padding: 10px 10px 8px; border-top: 1px solid color-mix(in srgb, var(--cgfc-theme-border, var(--border-light, rgba(0,0,0,.1))) 76%, transparent); }
+        .cgpt-queue-compose-row { display: flex; min-height: 48px; gap: 7px; padding: 5px 5px 5px 12px; align-items: flex-end; border: 1px solid color-mix(in srgb, var(--cgfc-theme-border, var(--border-light, rgba(0,0,0,.15))) 82%, transparent); border-radius: 18px; background: color-mix(in srgb, var(--cgfc-theme-surface-primary, var(--main-surface-primary, #fff)) 96%, transparent); box-shadow: inset 0 1px 0 rgba(255,255,255,.025); transition: border-color 140ms ease, box-shadow 160ms ease, background 160ms ease; }
+        .cgpt-queue-compose-row:focus-within { border-color: color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 24%, var(--cgfc-theme-border, rgba(127,127,127,.22))); box-shadow: 0 0 0 2px color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 7%, transparent), inset 0 1px 0 rgba(255,255,255,.03); }
+        .cgpt-queue-compose-row.cgpt-queue-file-dragover { border-color: color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 58%, white 10%); background: color-mix(in srgb, var(--cgfc-theme-surface-primary, #212121) 93%, var(--cgfc-queue-accent-color, #6d5dfc) 7%); box-shadow: 0 0 0 3px color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 11%, transparent); }
+        .cgpt-queue-draft-attachments { display: flex; flex-wrap: wrap; gap: 4px; }
+        .cgpt-queue-draft-attachments:empty { display: none; }
+        .cgpt-queue-compose textarea { box-sizing: border-box; min-width: 0; min-height: 28px; max-height: 112px; height: 28px; flex: 1; padding: 4px 2px 5px; resize: none; overflow-y: hidden; scrollbar-width: none; border: 0; border-radius: 0; background: transparent; color: var(--cgfc-queue-text-color, var(--cgfc-theme-text-primary, var(--text-primary, #161616))); box-shadow: none !important; font: inherit; font-size: 1em; line-height: 1.45; outline: none; color-scheme: var(--cgfc-color-scheme, light); }
+        .cgpt-queue-compose textarea::-webkit-scrollbar { display: none; }
+        .cgpt-queue-compose textarea::placeholder { color: var(--cgfc-queue-muted-color, var(--cgfc-theme-text-tertiary, var(--text-tertiary, #888))); opacity: .86; }
+        .cgpt-queue-edit-text.cgpt-queue-file-dragover { border-color: color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 52%, white 12%); background: color-mix(in srgb, var(--cgfc-theme-surface-primary, #212121) 93%, var(--cgfc-queue-accent-color, #6d5dfc) 7%); box-shadow: 0 0 0 3px color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 11%, transparent); }
+        .cgpt-queue-enqueue { display: inline-grid; width: 36px; height: 36px; padding: 0; flex: none; place-items: center; border: 0; border-radius: 50%; background: var(--cgfc-queue-accent-color, #6d5dfc); color: #fff; box-shadow: inset 0 1px 0 rgba(255,255,255,.22), 0 3px 9px color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 16%, transparent); cursor: pointer; line-height: 1; transition: transform 140ms ease, box-shadow 160ms ease, filter 160ms ease, opacity 160ms ease; }
+        .cgpt-queue-enqueue svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 2.35; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
+        .cgpt-queue-enqueue:not(:disabled):hover { transform: translateY(-1px); filter: brightness(1.045); box-shadow: 0 5px 13px color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 22%, transparent), inset 0 1px 0 rgba(255,255,255,.26); }
+        .cgpt-queue-enqueue:not(:disabled):active { transform: translateY(0) scale(.975); filter: brightness(.98); box-shadow: 0 2px 7px color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 18%, transparent), inset 0 2px 5px rgba(0,0,0,.20), inset 0 -1px 0 rgba(255,255,255,.10); }
+        .cgpt-queue-enqueue:focus-visible { outline: 2px solid color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 60%, white 40%); outline-offset: 3px; }
+        .cgpt-queue-enqueue:disabled { background: color-mix(in srgb, var(--cgfc-theme-surface-secondary, #2f2f2f) 84%, transparent); color: color-mix(in srgb, var(--cgfc-theme-text-tertiary, #888) 66%, transparent); box-shadow: inset 0 1px 0 rgba(255,255,255,.025); opacity: .78; cursor: default; }
+        .cgpt-queue-footer { display: flex; min-height: 26px; padding: 0 12px 9px; align-items: center; gap: 7px; color: var(--cgfc-queue-muted-color, var(--cgfc-theme-text-tertiary, var(--text-tertiary, #888))); font-size: .79em; }
         .cgpt-queue-dot { width: 6px; height: 6px; border-radius: 50%; background: #22c55e; }
         .cgpt-queue-dot[data-state="paused"] { background: #f59e0b; }
         .cgpt-queue-dot[data-state="busy"] { background: var(--cgfc-queue-accent-color, #6d5dfc); }
@@ -2541,7 +2836,12 @@
           .cgpt-queue-panel { width: calc(100vw - 20px); max-height: calc(100dvh - 20px); }
         }
         @media (prefers-reduced-motion: reduce) {
-          .cgpt-queue-capsule { transition: none; }
+          .cgpt-queue-capsule,
+          .cgpt-queue-icon-btn,
+          .cgpt-queue-row,
+          .cgpt-queue-row-actions button,
+          .cgpt-queue-compose-row,
+          .cgpt-queue-enqueue { transition: none !important; }
         }
       `;
       (document.head || document.documentElement)?.appendChild(style);
@@ -2587,9 +2887,12 @@
       const pause = this.makeButton('暂停', '暂停自动发送');
       const clear = this.makeButton('清空', '清空待发送消息');
       const close = this.makeButton('×', '关闭发送队列');
+      close.dataset.iconOnly = 'true';
+      close.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>';
       pause.addEventListener('click', () => this.runtime.messageQueue?.togglePause?.());
       clear.addEventListener('click', () => {
-        const count = this.runtime.messageQueue?.snapshot?.().items?.length || 0;
+        const items = this.runtime.messageQueue?.snapshot?.().items || [];
+        const count = items.filter((item) => item.status !== 'sending').length;
         if (!count || window.confirm(`清空 ${count} 条待发送消息？`)) this.runtime.messageQueue?.clear?.();
       });
       close.addEventListener('click', () => this.close());
@@ -2601,17 +2904,58 @@
 
       const compose = document.createElement('div');
       compose.className = 'cgpt-queue-compose';
+      const draftAttachmentList = document.createElement('div');
+      draftAttachmentList.className = 'cgpt-queue-draft-attachments';
+      const composeRow = document.createElement('div');
+      composeRow.className = 'cgpt-queue-compose-row';
       const input = document.createElement('textarea');
       input.rows = 1;
-      input.placeholder = '输入待发送消息，Enter 入队';
+      input.placeholder = '输入待发送消息';
       input.setAttribute('aria-label', '发送队列输入框');
       const enqueue = document.createElement('button');
       enqueue.type = 'button';
       enqueue.className = 'cgpt-queue-enqueue';
-      enqueue.textContent = '↑';
+      enqueue.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m0 0-5.25 5.25M12 5l5.25 5.25"/></svg>';
       enqueue.title = '加入发送队列';
+      enqueue.setAttribute('aria-label', '加入发送队列');
       enqueue.disabled = true;
-      input.addEventListener('input', () => { enqueue.disabled = !input.value.trim(); });
+      const syncEnqueueDisabled = () => {
+        enqueue.disabled = !String(input.value || '').trim() && !this.draftAttachments.length;
+      };
+      input.addEventListener('input', () => {
+        syncEnqueueDisabled();
+        this.syncTextareaHeight(input, 28, 112);
+      });
+      input.addEventListener('paste', (event) => {
+        const files = this.extractClipboardFiles(event);
+        if (!files.length) return;
+        this.mergeDraftFiles(files);
+        syncEnqueueDisabled();
+        this.renderDraftAttachments();
+        // Do not preventDefault: when clipboard also contains plain text, keep
+        // the textarea's native paste behavior while capturing file payloads.
+      });
+      composeRow.addEventListener('dragover', (event) => {
+        if (!this.hasFileTransfer(event.dataTransfer)) return;
+        event.preventDefault();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+        composeRow.classList.add('cgpt-queue-file-dragover');
+      });
+      composeRow.addEventListener('dragleave', (event) => {
+        if (!composeRow.contains(event.relatedTarget)) composeRow.classList.remove('cgpt-queue-file-dragover');
+      });
+      composeRow.addEventListener('drop', (event) => {
+        if (!this.hasFileTransfer(event.dataTransfer)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const files = this.extractDataTransferFiles(event.dataTransfer);
+        composeRow.classList.remove('cgpt-queue-file-dragover');
+        if (!files.length) return;
+        this.mergeDraftFiles(files);
+        syncEnqueueDisabled();
+        this.renderDraftAttachments();
+        input.focus({ preventScroll: true });
+      });
       input.addEventListener('keydown', (event) => {
         if (event.key === 'Escape') {
           event.stopPropagation();
@@ -2623,14 +2967,15 @@
         this.enqueueInput();
       });
       enqueue.addEventListener('click', () => this.enqueueInput());
-      compose.append(input, enqueue);
+      composeRow.append(input, enqueue);
+      compose.append(draftAttachmentList, composeRow);
 
       const footer = document.createElement('div');
       footer.className = 'cgpt-queue-footer';
       const dot = document.createElement('span');
       dot.className = 'cgpt-queue-dot';
       const status = document.createElement('span');
-      status.textContent = '等待消息';
+      status.textContent = 'Enter 入队 · Shift+Enter 换行 · 拖入/粘贴附件';
       footer.append(dot, status);
 
       panel.append(header, list, compose, footer);
@@ -2647,11 +2992,14 @@
       this.clearButton = clear;
       this.list = list;
       this.input = input;
+      this.draftAttachmentList = draftAttachmentList;
       this.enqueueButton = enqueue;
       this.status = status;
       this.statusDot = dot;
       this.capsule.hidden = this.isOpen;
       this.panel.hidden = !this.isOpen;
+      this.renderDraftAttachments();
+      this.syncTextareaHeight(input, 28, 112);
       return true;
     }
 
@@ -2661,17 +3009,218 @@
       button.className = 'cgpt-queue-icon-btn';
       button.textContent = text;
       button.title = title;
+      button.setAttribute('aria-label', title || text);
       return button;
+    }
+
+    syncTextareaHeight(textarea, minHeight = 28, maxHeight = 112) {
+      if (!(textarea instanceof HTMLTextAreaElement)) return;
+      textarea.style.height = '0px';
+      const scrollHeight = Math.max(minHeight, textarea.scrollHeight || minHeight);
+      const height = Math.min(maxHeight, scrollHeight);
+      textarea.style.height = `${height}px`;
+      textarea.style.overflowY = scrollHeight > maxHeight ? 'auto' : 'hidden';
+    }
+
+    refreshEditingView(editor, forceFocus = false) {
+      const hadFocus = forceFocus || document.activeElement === editor;
+      const selectionStart = editor instanceof HTMLTextAreaElement ? editor.selectionStart : null;
+      const selectionEnd = editor instanceof HTMLTextAreaElement ? editor.selectionEnd : null;
+      this.render();
+      const next = this.list?.querySelector?.('.cgpt-queue-edit-text');
+      if (!(next instanceof HTMLTextAreaElement)) return;
+      this.syncTextareaHeight(next, 48, 140);
+      if (!hadFocus) return;
+      next.focus({ preventScroll: true });
+      if (Number.isInteger(selectionStart) && Number.isInteger(selectionEnd)) {
+        const length = next.value.length;
+        try { next.setSelectionRange(Math.min(selectionStart, length), Math.min(selectionEnd, length)); } catch {}
+      }
+    }
+
+    makeRowActionButton(svgPath, title, ariaLabel = title) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.title = title;
+      button.setAttribute('aria-label', ariaLabel);
+      button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${svgPath}"/></svg>`;
+      return button;
+    }
+
+    hasFileTransfer(dataTransfer) {
+      if (!dataTransfer) return false;
+      if (Array.from(dataTransfer.files || []).length) return true;
+      if (Array.from(dataTransfer.items || []).some((item) => item?.kind === 'file')) return true;
+      return Array.from(dataTransfer.types || []).some((type) => String(type).toLowerCase() === 'files');
+    }
+
+    extractDataTransferFiles(dataTransfer) {
+      if (!dataTransfer) return [];
+      const files = [];
+      const seen = new Set();
+      const add = (file) => {
+        if (!(file instanceof File)) return;
+        const key = `${file.name}:${file.size}:${file.type}:${file.lastModified}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        files.push(file);
+      };
+      Array.from(dataTransfer.files || []).forEach(add);
+      Array.from(dataTransfer.items || []).forEach((item) => {
+        if (item?.kind !== 'file') return;
+        try { add(item.getAsFile?.()); } catch {}
+      });
+      return files;
+    }
+
+    extractClipboardFiles(event) {
+      return this.extractDataTransferFiles(event?.clipboardData);
+    }
+
+    mergeDraftFiles(files) {
+      const existing = new Set(this.draftAttachments.map((file) => `${file.name}:${file.size}:${file.type}:${file.lastModified}`));
+      for (const file of files) {
+        const key = `${file.name}:${file.size}:${file.type}:${file.lastModified}`;
+        if (existing.has(key)) continue;
+        this.draftAttachments.push(file);
+        existing.add(key);
+      }
+    }
+
+    mergeEditFiles(files) {
+      if (!this.editDraft) return;
+      const existing = new Set(this.editDraft.attachments.map((attachment) => {
+        const file = attachment?.file || attachment;
+        return `${file?.name || ''}:${file?.size || 0}:${file?.type || ''}:${file?.lastModified || 0}`;
+      }));
+      for (const file of files) {
+        const key = `${file.name}:${file.size}:${file.type}:${file.lastModified}`;
+        if (existing.has(key)) continue;
+        this.editDraft.attachments.push({
+          file,
+          name: file.name,
+          type: file.type,
+          size: file.size,
+          lastModified: file.lastModified,
+        });
+        existing.add(key);
+      }
     }
 
     enqueueInput() {
       const content = String(this.input?.value || '').trim();
-      if (!content) return;
-      const item = this.runtime.messageQueue?.enqueue?.(content, { source: 'composer-dock' });
+      const attachments = [...this.draftAttachments];
+      if (!content && !attachments.length) return;
+      const item = this.runtime.messageQueue?.enqueue?.(content, { source: 'composer-dock' }, attachments);
       if (!item) return;
       this.input.value = '';
+      this.draftAttachments = [];
       if (this.enqueueButton) this.enqueueButton.disabled = true;
+      this.renderDraftAttachments();
+      this.syncTextareaHeight(this.input, 28, 112);
       this.input.focus({ preventScroll: true });
+      this.render();
+      // Some synthetic/IME key paths can apply a trailing line break after
+      // keydown even though it was prevented. Clean only whitespace so a real
+      // user keystroke can never be erased.
+      window.setTimeout(() => {
+        if (this.input && !String(this.input.value || '').trim()) {
+          this.input.value = '';
+          this.syncTextareaHeight(this.input, 28, 112);
+        }
+      }, 0);
+    }
+
+    formatFileSize(bytes) {
+      const value = Math.max(0, Number(bytes || 0));
+      if (value < 1024) return `${value} B`;
+      if (value < 1024 * 1024) return `${(value / 1024).toFixed(value < 10 * 1024 ? 1 : 0)} KB`;
+      return `${(value / (1024 * 1024)).toFixed(value < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+    }
+
+    makeAttachmentChip(attachment, onRemove = null) {
+      const file = attachment?.file || attachment;
+      const name = String(attachment?.name || file?.name || '附件');
+      const size = Number(attachment?.size ?? file?.size ?? 0);
+      const chip = document.createElement('span');
+      chip.className = 'cgpt-queue-attachment';
+      chip.title = size ? `${name} · ${this.formatFileSize(size)}` : name;
+      const icon = document.createElement('span');
+      icon.className = 'cgpt-queue-attachment-icon';
+      const isImage = String(attachment?.type || file?.type || '').startsWith('image/');
+      icon.innerHTML = isImage
+        ? '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="m6.5 16 3.6-3.8 2.8 2.7 2.2-2.2 2.9 3.3M9 9h.01"/></svg>'
+        : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3.5h6l4 4V20H7zM13 3.5V8h4M9.5 12h5M9.5 15.5h5"/></svg>';
+      const label = document.createElement('span');
+      label.className = 'cgpt-queue-attachment-name';
+      label.textContent = name;
+      chip.append(icon, label);
+      if (typeof onRemove === 'function') {
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'cgpt-queue-attachment-remove';
+        remove.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7m0-7-7 7"/></svg>';
+        remove.title = `移除 ${name}`;
+        remove.setAttribute('aria-label', `移除 ${name}`);
+        remove.addEventListener('click', (event) => {
+          event.stopPropagation();
+          onRemove();
+        });
+        chip.appendChild(remove);
+      }
+      return chip;
+    }
+
+    renderDraftAttachments() {
+      if (!this.draftAttachmentList) return;
+      const fragment = document.createDocumentFragment();
+      this.draftAttachments.forEach((file, index) => {
+        fragment.appendChild(this.makeAttachmentChip(file, () => {
+          this.draftAttachments.splice(index, 1);
+          if (this.enqueueButton) {
+            this.enqueueButton.disabled = !String(this.input?.value || '').trim() && !this.draftAttachments.length;
+          }
+          this.renderDraftAttachments();
+        }));
+      });
+      this.draftAttachmentList.replaceChildren(fragment);
+    }
+
+    startEditItem(item) {
+      if (!item || item.status === 'sending') return;
+      this.editDraft = {
+        id: item.id,
+        content: String(item.content || ''),
+        attachments: (Array.isArray(item.attachments) ? item.attachments : []).map((attachment) => ({ ...attachment })),
+      };
+      const started = this.runtime.messageQueue?.beginEdit?.(item.id);
+      if (!started) {
+        this.editDraft = null;
+        return;
+      }
+      window.setTimeout(() => {
+        const editor = this.list?.querySelector?.('.cgpt-queue-edit-text');
+        if (editor instanceof HTMLTextAreaElement) editor.focus({ preventScroll: true });
+      }, 0);
+    }
+
+    saveEditItem(id) {
+      if (!this.editDraft || this.editDraft.id !== id) return;
+      const content = String(this.editDraft.content || '').trim();
+      const attachments = [...this.editDraft.attachments];
+      if (!content && !attachments.length) {
+        window.alert('队列消息不能同时没有文字和附件。');
+        return;
+      }
+      const saved = this.runtime.messageQueue?.update?.(id, content, attachments);
+      if (!saved) return;
+      this.editDraft = null;
+      this.render();
+    }
+
+    cancelEditItem(id) {
+      this.editDraft = null;
+      this.runtime.messageQueue?.cancelEdit?.(id);
       this.render();
     }
 
@@ -2682,11 +3231,19 @@
       this.panel.hidden = false;
       this.render();
       this.schedulePosition();
-      window.setTimeout(() => this.input?.focus({ preventScroll: true }), 0);
+      window.setTimeout(() => {
+        this.syncTextareaHeight(this.input, 28, 112);
+        this.input?.focus({ preventScroll: true });
+      }, 0);
     }
 
     close() {
       if (!this.root) return;
+      const editingId = this.runtime.messageQueue?.snapshot?.().editingItemId;
+      if (editingId) {
+        this.editDraft = null;
+        this.runtime.messageQueue?.cancelEdit?.(editingId);
+      }
       this.isOpen = false;
       this.panel.hidden = true;
       this.capsule.hidden = false;
@@ -2705,7 +3262,11 @@
       this.countLabel.textContent = `发送队列 · ${count}`;
       this.pauseButton.textContent = snapshot.isPaused ? '继续' : '暂停';
       this.pauseButton.title = snapshot.isPaused ? '继续自动发送' : '暂停自动发送';
-      this.clearButton.disabled = count === 0;
+      this.clearButton.disabled = !items.some((item) => item.status !== 'sending');
+      this.clearButton.title = items.some((item) => item.status === 'sending')
+        ? '清空待发送消息（发送中的消息会保留）'
+        : '清空待发送消息';
+      if (!snapshot.editingItemId && this.editDraft) this.editDraft = null;
 
       const fragment = document.createDocumentFragment();
       if (!count) {
@@ -2724,30 +3285,135 @@
         idx.textContent = String(index + 1);
         const main = document.createElement('div');
         main.className = 'cgpt-queue-main';
-        const text = document.createElement('div');
-        text.className = 'cgpt-queue-text';
-        text.textContent = String(item.content || '').replace(/\s+/g, ' ').trim();
-        text.title = String(item.content || '');
+        const isEditing = snapshot.editingItemId === item.id;
+        if (isEditing) {
+          if (!this.editDraft || this.editDraft.id !== item.id) {
+            this.editDraft = {
+              id: item.id,
+              content: String(item.content || ''),
+              attachments: (Array.isArray(item.attachments) ? item.attachments : []).map((attachment) => ({ ...attachment })),
+            };
+          }
+          const editor = document.createElement('textarea');
+          editor.className = 'cgpt-queue-edit-text';
+          editor.value = this.editDraft.content;
+          editor.setAttribute('aria-label', `编辑队列消息 ${index + 1}`);
+          editor.addEventListener('input', () => {
+            this.editDraft.content = editor.value;
+            this.syncTextareaHeight(editor, 48, 140);
+          });
+          editor.addEventListener('paste', (event) => {
+            const files = this.extractClipboardFiles(event);
+            if (!files.length) return;
+            this.mergeEditFiles(files);
+            // Keep native text paste, then re-render attachment chips after the
+            // textarea input event has synchronized editDraft.content.
+            window.setTimeout(() => this.refreshEditingView(editor, true), 0);
+          });
+          editor.addEventListener('dragover', (event) => {
+            if (!this.hasFileTransfer(event.dataTransfer)) return;
+            event.preventDefault();
+            if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+            editor.classList.add('cgpt-queue-file-dragover');
+          });
+          editor.addEventListener('dragleave', () => {
+            editor.classList.remove('cgpt-queue-file-dragover');
+          });
+          editor.addEventListener('drop', (event) => {
+            if (!this.hasFileTransfer(event.dataTransfer)) return;
+            event.preventDefault();
+            event.stopPropagation();
+            const files = this.extractDataTransferFiles(event.dataTransfer);
+            editor.classList.remove('cgpt-queue-file-dragover');
+            if (!files.length) return;
+            this.mergeEditFiles(files);
+            this.refreshEditingView(editor, true);
+          });
+          editor.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              this.cancelEditItem(item.id);
+            } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+              event.preventDefault();
+              this.saveEditItem(item.id);
+            }
+          });
+          main.appendChild(editor);
+          window.setTimeout(() => {
+            if (editor.isConnected) this.syncTextareaHeight(editor, 48, 140);
+          }, 0);
+
+          const editAttachments = document.createElement('div');
+          editAttachments.className = 'cgpt-queue-attachments';
+          this.editDraft.attachments.forEach((attachment, attachmentIndex) => {
+            editAttachments.appendChild(this.makeAttachmentChip(attachment, () => {
+              if (!this.editDraft || this.editDraft.id !== item.id) return;
+              this.editDraft.attachments.splice(attachmentIndex, 1);
+              this.render();
+            }));
+          });
+          main.appendChild(editAttachments);
+
+          const editTools = document.createElement('div');
+          editTools.className = 'cgpt-queue-edit-tools';
+          const save = document.createElement('button');
+          save.type = 'button';
+          save.className = 'cgpt-queue-mini-btn';
+          save.textContent = '保存';
+          save.title = '保存修改（Ctrl/⌘ + Enter）';
+          save.addEventListener('click', () => this.saveEditItem(item.id));
+          const cancel = document.createElement('button');
+          cancel.type = 'button';
+          cancel.className = 'cgpt-queue-mini-btn';
+          cancel.textContent = '取消';
+          cancel.addEventListener('click', () => this.cancelEditItem(item.id));
+          editTools.append(save, cancel);
+          main.appendChild(editTools);
+        } else {
+          const text = document.createElement('div');
+          text.className = 'cgpt-queue-text';
+          const normalizedText = String(item.content || '').replace(/\s+/g, ' ').trim();
+          text.textContent = normalizedText || '（仅附件）';
+          text.title = String(item.content || '');
+          main.appendChild(text);
+
+          const attachments = document.createElement('div');
+          attachments.className = 'cgpt-queue-attachments';
+          (Array.isArray(item.attachments) ? item.attachments : []).forEach((attachment) => {
+            attachments.appendChild(this.makeAttachmentChip(attachment));
+          });
+          main.appendChild(attachments);
+        }
         const itemStatus = document.createElement('div');
         itemStatus.className = 'cgpt-queue-item-status';
-        itemStatus.textContent = item.status === 'pending' && queue?.isItemOnCurrentConversation?.(item) === false
+        itemStatus.textContent = item.error
+          ? `${labels[item.status] || item.status || '失败'} · ${item.error}`
+          : item.status === 'pending' && queue?.isItemOnCurrentConversation?.(item) === false
           ? '等待原会话'
           : labels[item.status] || item.status || '等待';
-        main.append(text, itemStatus);
+        main.appendChild(itemStatus);
         const actions = document.createElement('div');
         actions.className = 'cgpt-queue-row-actions';
-        if (item.status === 'failed') {
-          const retry = document.createElement('button');
-          retry.type = 'button';
-          retry.textContent = '↻';
-          retry.title = '重试';
+        if (!isEditing && item.status !== 'sending') {
+          const edit = this.makeRowActionButton(
+            'M4.5 19.5 8 18.8 18.2 8.6a2.1 2.1 0 0 0-3-3L4.8 15.8zM13.8 7l3 3',
+            '编辑消息和附件',
+            `编辑队列消息 ${index + 1}`
+          );
+          edit.addEventListener('click', () => this.startEditItem(item));
+          actions.appendChild(edit);
+        }
+        if (!isEditing && item.status === 'failed') {
+          const retry = this.makeRowActionButton(
+            'M20 11a8 8 0 1 1-2.34-5.66L20 7.7M20 3.5v4.2h-4.2',
+            '重试'
+          );
           retry.addEventListener('click', () => queue?.retry?.(item.id));
           actions.appendChild(retry);
         }
-        const remove = document.createElement('button');
-        remove.type = 'button';
-        remove.textContent = '×';
-        remove.title = '移出队列';
+        const removeTitle = isEditing ? '编辑中，请先保存或取消' : item.status === 'sending' ? '发送中，暂不能移出' : '移出队列';
+        const remove = this.makeRowActionButton('M6 6l12 12M18 6 6 18', removeTitle);
+        remove.disabled = isEditing || item.status === 'sending';
         remove.addEventListener('click', () => queue?.remove?.(item.id));
         actions.appendChild(remove);
         row.append(idx, main, actions);
@@ -2756,11 +3422,12 @@
       this.list.replaceChildren(fragment);
 
       const generating = Boolean(this.runtime.isGenerating?.());
-      this.statusDot.dataset.state = snapshot.isPaused ? 'paused' : generating ? 'busy' : 'idle';
-      if (snapshot.isPaused) this.status.textContent = '已暂停自动发送';
+      this.statusDot.dataset.state = snapshot.editingItemId || snapshot.isPaused ? 'paused' : generating ? 'busy' : 'idle';
+      if (snapshot.editingItemId) this.status.textContent = '正在编辑队列消息，自动发送暂缓';
+      else if (snapshot.isPaused) this.status.textContent = '已暂停自动发送';
       else if (generating) this.status.textContent = count ? '等待当前回答完成后继续' : '当前正在生成回答';
-      else if (count) this.status.textContent = '检测到空闲后自动发送下一条';
-      else this.status.textContent = '等待消息';
+      else if (count) this.status.textContent = '等待空闲后自动发送下一条';
+      else this.status.textContent = 'Enter 入队 · Shift+Enter 换行 · 拖入/粘贴附件';
     }
 
     resolveComposerShell(composer) {
@@ -2850,6 +3517,15 @@
       if (!(shell instanceof Element) || !shell.isConnected) {
         this.root.hidden = true;
         return;
+      }
+      if (this.neumorphicShell !== shell) {
+        if (this.neumorphicShell instanceof Element && this.neumorphicShell.isConnected) {
+          this.neumorphicShell.removeAttribute('data-cgfc-neumorphic-composer');
+        }
+        this.neumorphicShell = shell;
+      }
+      if (shell.getAttribute('data-cgfc-neumorphic-composer') !== 'true') {
+        shell.setAttribute('data-cgfc-neumorphic-composer', 'true');
       }
       const rect = shell.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0 || rect.bottom < 0 || rect.top > window.innerHeight) {
@@ -9223,6 +9899,7 @@
     queueBackgroundColor: '#212121',
     queueAccentColor: '#6d5dfc',
     queueOpacity: 0.94,
+    enableNeumorphicAppearance: true,
     showTokenStats: true,
     showTokenMessageChips: true,
     showTokenSummary: true,
@@ -9307,6 +9984,7 @@
     queueBackgroundColor: 'color',
     queueAccentColor: 'color',
     queueOpacity: 'number',
+    enableNeumorphicAppearance: 'boolean',
     showTokenStats: 'boolean',
     showTokenMessageChips: 'boolean',
     showTokenSummary: 'boolean',
@@ -9885,6 +10563,7 @@
     root.toggleAttribute('data-cgfc-wrap-code', settings.wrapCode);
     root.toggleAttribute('data-cgfc-katex-letter-font', settings.enableKatexLetterFont && enabled('mathFont'));
     root.toggleAttribute('data-cgfc-formula-copy', settings.enableFormulaCopy);
+    root.toggleAttribute('data-cgfc-neumorphic-appearance', settings.enableNeumorphicAppearance);
     root.toggleAttribute('data-cgpt-token-stats-enabled', settings.showTokenStats);
     root.toggleAttribute('data-cgpt-token-message-chips-enabled', settings.showTokenMessageChips);
     root.toggleAttribute('data-cgpt-token-summary-enabled', settings.showTokenSummary);
@@ -11168,6 +11847,7 @@
     toolboxGroup.appendChild(toolboxHint);
 
     const queueGroup = createSettingsGroup(panel, '输入框旁发送队列外观');
+    appendControl(queueGroup, { label: '启用精细深色拟态 Soft UI（输入框 + 队列）', key: 'enableNeumorphicAppearance', type: 'checkbox' });
     appendControl(queueGroup, { label: '队列字体', key: 'queueFont', type: 'font-select' });
     row = createRow(queueGroup);
     appendControl(row, { label: '字号 px', key: 'queueFontSize', type: 'number', min: 9, max: 24, step: 1 });
@@ -11181,7 +11861,7 @@
     appendControl(row, { label: '背景透明度', key: 'queueOpacity', type: 'number', min: 0.2, max: 1, step: 0.05 });
     const queueHint = document.createElement('p');
     queueHint.className = 'cgfc-hint';
-    queueHint.textContent = '每个外观项均可独立启停；关闭颜色项后继续跟随 ChatGPT 明暗主题。队列面板会自动限制在当前可视区域内，手机软键盘弹出后也会重新定位。';
+    queueHint.textContent = '“精细深色拟态 Soft UI”统一输入框、队列面板/贴片与发送按钮的柔和高光、阴影和按压反馈；关闭后恢复普通主题外观。其他外观项仍可独立启停。';
     queueGroup.appendChild(queueHint);
 
     const statsGroup = createSettingsGroup(panel, 'Token 统计（估算）');
@@ -11230,6 +11910,7 @@
       OVERRIDEABLE_SETTING_KEYS.forEach((key) => { next[overrideEnabledKey(key)] = false; });
       next.toolboxUseCustomColors = false;
       next.queueUseCustomColors = false;
+      next.enableNeumorphicAppearance = false;
       settings = next;
       writeStore(STORAGE_KEY, settings);
       applySettings();
@@ -11891,6 +12572,162 @@
       --cgfc-theme-shadow-soft: 0 8px 28px rgba(0, 0, 0, .38);
       --cgfc-theme-shadow-strong: 0 14px 36px rgba(0, 0, 0, .42);
       --cgfc-theme-overlay: rgba(0, 0, 0, .58);
+      --cgfc-neu-highlight: rgba(255, 255, 255, .026);
+      --cgfc-neu-highlight-edge: rgba(255, 255, 255, .060);
+      --cgfc-neu-shadow: rgba(0, 0, 0, .44);
+      --cgfc-neu-shadow-inset: rgba(0, 0, 0, .18);
+    }
+
+    /* v1.6.2 refined dark Soft UI: restrained depth, one consistent light source. */
+    html[data-cgfc-theme="dark"][data-cgfc-neumorphic-appearance] [data-cgfc-neumorphic-composer="true"] {
+      background: color-mix(in srgb, var(--cgfc-theme-surface-primary, #212121) 98%, white 2%) !important;
+      border-color: rgba(255, 255, 255, .018) !important;
+      box-shadow:
+        -6px -6px 16px var(--cgfc-neu-highlight),
+        7px 8px 20px var(--cgfc-neu-shadow),
+        inset 0 1px 0 var(--cgfc-neu-highlight-edge),
+        inset 0 -1px 0 rgba(0, 0, 0, .28) !important;
+      transition: box-shadow 180ms ease, background 180ms ease, border-color 180ms ease;
+    }
+
+    html[data-cgfc-theme="dark"][data-cgfc-neumorphic-appearance] [data-cgfc-neumorphic-composer="true"]:has(#prompt-textarea:focus, textarea[name="prompt-textarea"]:focus, [contenteditable="true"]:focus) {
+      background: color-mix(in srgb, var(--cgfc-theme-surface-primary, #212121) 99%, white 1%) !important;
+      border-color: rgba(255, 255, 255, .028) !important;
+      box-shadow:
+        -3px -3px 10px rgba(255, 255, 255, .018),
+        5px 6px 14px rgba(0, 0, 0, .34),
+        inset 4px 4px 12px var(--cgfc-neu-shadow-inset),
+        inset -3px -3px 10px rgba(255, 255, 255, .012),
+        inset 0 1px 0 rgba(255, 255, 255, .045) !important;
+    }
+
+    html[data-cgfc-theme="dark"][data-cgfc-neumorphic-appearance] .cgpt-queue-capsule {
+      background: linear-gradient(145deg,
+        color-mix(in srgb, var(--cgfc-queue-panel-background, var(--cgfc-theme-surface-primary, #212121)) 97%, white 3%),
+        color-mix(in srgb, var(--cgfc-queue-panel-background, var(--cgfc-theme-surface-primary, #212121)) 98%, black 2%));
+      border-color: rgba(255, 255, 255, .032);
+      box-shadow:
+        -4px -4px 11px rgba(255, 255, 255, .022),
+        5px 6px 14px rgba(0, 0, 0, .40),
+        inset 0 1px 0 rgba(255, 255, 255, .055),
+        inset 0 -1px 0 rgba(0, 0, 0, .24);
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+    }
+
+    html[data-cgfc-theme="dark"][data-cgfc-neumorphic-appearance] .cgpt-queue-capsule:hover {
+      transform: translateY(-1px);
+      background: linear-gradient(145deg,
+        color-mix(in srgb, var(--cgfc-queue-panel-background, var(--cgfc-theme-surface-primary, #212121)) 95%, white 5%),
+        color-mix(in srgb, var(--cgfc-queue-panel-background, var(--cgfc-theme-surface-primary, #212121)) 98%, black 2%));
+      box-shadow:
+        -4px -4px 12px rgba(255, 255, 255, .028),
+        6px 7px 16px rgba(0, 0, 0, .43),
+        inset 0 1px 0 rgba(255, 255, 255, .065),
+        inset 0 -1px 0 rgba(0, 0, 0, .22);
+    }
+
+    html[data-cgfc-theme="dark"][data-cgfc-neumorphic-appearance] .cgpt-queue-capsule:active {
+      transform: translateY(0) scale(.985);
+      box-shadow:
+        inset 3px 3px 9px rgba(0, 0, 0, .24),
+        inset -2px -2px 7px rgba(255, 255, 255, .014),
+        0 2px 6px rgba(0, 0, 0, .24);
+    }
+
+    html[data-cgfc-theme="dark"][data-cgfc-neumorphic-appearance] .cgpt-queue-panel {
+      background: color-mix(in srgb, var(--cgfc-queue-panel-background, var(--cgfc-theme-surface-primary, #212121)) 98%, white 2%);
+      border-color: rgba(255, 255, 255, .035);
+      box-shadow:
+        -7px -7px 20px rgba(255, 255, 255, .015),
+        12px 14px 32px rgba(0, 0, 0, .44),
+        inset 0 1px 0 rgba(255, 255, 255, .045),
+        inset 0 -1px 0 rgba(0, 0, 0, .24);
+    }
+
+    html[data-cgfc-theme="dark"][data-cgfc-neumorphic-appearance] .cgpt-queue-row {
+      background: color-mix(in srgb, var(--cgfc-theme-surface-secondary, #2f2f2f) 62%, transparent);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .020), inset 0 -1px 0 rgba(0, 0, 0, .12);
+    }
+
+    html[data-cgfc-theme="dark"][data-cgfc-neumorphic-appearance] .cgpt-queue-compose-row {
+      border-color: rgba(255, 255, 255, .030);
+      background: color-mix(in srgb, var(--cgfc-theme-surface-primary, #212121) 97%, black 3%);
+      box-shadow:
+        -3px -3px 9px rgba(255, 255, 255, .014),
+        4px 5px 12px rgba(0, 0, 0, .24),
+        inset 0 1px 0 rgba(255, 255, 255, .035),
+        inset 0 -1px 0 rgba(0, 0, 0, .14);
+    }
+
+    html[data-cgfc-theme="dark"][data-cgfc-neumorphic-appearance] .cgpt-queue-compose-row:focus-within {
+      border-color: color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 22%, rgba(255, 255, 255, .04));
+      box-shadow:
+        -2px -2px 7px rgba(255, 255, 255, .012),
+        3px 4px 10px rgba(0, 0, 0, .20),
+        0 0 0 2px color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 6%, transparent),
+        inset 2px 2px 7px rgba(0, 0, 0, .12),
+        inset 0 1px 0 rgba(255, 255, 255, .032);
+    }
+
+    html[data-cgfc-theme="dark"][data-cgfc-neumorphic-appearance] .cgpt-queue-compose textarea {
+      border: 0;
+      background: transparent;
+      box-shadow: none !important;
+    }
+
+    html[data-cgfc-theme="dark"][data-cgfc-neumorphic-appearance] .cgpt-queue-edit-text {
+      border-color: rgba(255, 255, 255, .025);
+      background: color-mix(in srgb, var(--cgfc-theme-surface-primary, #212121) 96%, black 4%);
+      box-shadow:
+        inset 2px 2px 7px rgba(0, 0, 0, .18),
+        inset -1px -1px 5px rgba(255, 255, 255, .012),
+        inset 0 1px 0 rgba(255, 255, 255, .025);
+    }
+
+    html[data-cgfc-theme="dark"][data-cgfc-neumorphic-appearance] .cgpt-queue-edit-text:focus {
+      border-color: color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 30%, rgba(255, 255, 255, .05));
+      box-shadow:
+        inset 2px 2px 7px rgba(0, 0, 0, .20),
+        inset -1px -1px 5px rgba(255, 255, 255, .014),
+        0 0 0 2px color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 9%, transparent);
+    }
+
+    html[data-cgfc-theme="dark"][data-cgfc-neumorphic-appearance] .cgpt-queue-compose-row.cgpt-queue-file-dragover {
+      border-color: color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 50%, white 10%);
+      background: color-mix(in srgb, var(--cgfc-theme-surface-primary, #212121) 94%, var(--cgfc-queue-accent-color, #6d5dfc) 6%);
+      box-shadow:
+        0 0 0 3px color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 10%, transparent),
+        4px 5px 12px rgba(0, 0, 0, .20),
+        inset 0 1px 0 rgba(255, 255, 255, .035);
+    }
+
+    html[data-cgfc-theme="dark"][data-cgfc-neumorphic-appearance] .cgpt-queue-enqueue:not(:disabled) {
+      background: linear-gradient(145deg,
+        color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 90%, white 10%),
+        color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 96%, black 4%));
+      box-shadow:
+        -2px -2px 6px rgba(255, 255, 255, .020),
+        3px 4px 9px rgba(0, 0, 0, .26),
+        0 3px 9px color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 12%, transparent),
+        inset 0 1px 0 rgba(255, 255, 255, .28),
+        inset 0 -1px 0 rgba(0, 0, 0, .14);
+    }
+
+    html[data-cgfc-theme="dark"][data-cgfc-neumorphic-appearance] .cgpt-queue-enqueue:not(:disabled):hover {
+      box-shadow:
+        -2px -2px 7px rgba(255, 255, 255, .024),
+        4px 5px 11px rgba(0, 0, 0, .28),
+        0 4px 11px color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 15%, transparent),
+        inset 0 1px 0 rgba(255, 255, 255, .32),
+        inset 0 -1px 0 rgba(0, 0, 0, .13);
+    }
+
+    html[data-cgfc-theme="dark"][data-cgfc-neumorphic-appearance] .cgpt-queue-enqueue:not(:disabled):active {
+      box-shadow:
+        inset 3px 3px 9px rgba(0, 0, 0, .25),
+        inset -2px -2px 7px rgba(255, 255, 255, .045),
+        0 2px 7px color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 15%, transparent);
     }
 
     html[data-cgfc-body-font] body,
