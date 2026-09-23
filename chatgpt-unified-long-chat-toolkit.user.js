@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT 长对话统一工具箱（性能·导航·提示词·导出·排版）
 // @namespace    local.codex.chatgpt.unified
-// @version      1.6.4
-// @description  ChatGPT 长对话性能、导航、提示词、导出与排版工具箱；v1.6.4 重做发送队列输入区并统一细节交互与视觉。
+// @version      1.6.10
+// @description  ChatGPT 长对话性能、导航、提示词、导出与排版工具箱；v1.6.10 调整提示词列表滚动条外观。
 // @author       Codex；含 Alex S Hamilton 的 ChatGPT Lazy Chat++（GPL-3.0-or-later）
 // @homepageURL  https://github.com/zjc1772665101-source/chatgpt-unified-long-chat-toolkit
 // @supportURL   https://github.com/zjc1772665101-source/chatgpt-unified-long-chat-toolkit/issues
@@ -33,7 +33,7 @@
   const PROMPT_STORAGE_KEY = 'cgpt-unified-prompt-library-v1';
   const runtime = globalThis[RUNTIME_KEY] || (globalThis[RUNTIME_KEY] = {});
 
-  runtime.version = '1.6.4';
+  runtime.version = '1.6.10';
   runtime.lazy = runtime.lazy || null;
   runtime.navigationLeaseTimer = 0;
   runtime.beginNavigationLease = (duration = 3200) => {
@@ -73,9 +73,13 @@
     const children = () => Array.from(node.childNodes).map((child) => nodeToMarkdown(child, depth)).join('');
     const text = () => normalizeText(children());
 
-    if (node.matches('.katex')) {
-      const latex = node.querySelector('annotation[encoding="application/x-tex"]')?.textContent?.trim();
-      if (latex) return node.closest('.katex-display') ? `\n$$\n${latex}\n$$\n\n` : `$${latex}$`;
+    if (node.matches('.katex, math, [data-latex], [data-math-source]')) {
+      const latex = node.querySelector('annotation[encoding="application/x-tex"]')?.textContent?.trim()
+        || node.getAttribute('data-latex')
+        || node.getAttribute('data-math-source');
+      const isBlock = node.matches('.katex-display, .math-block, math[display="block"]')
+        || Boolean(node.closest('.katex-display, .math-block'));
+      if (latex) return isBlock ? `\n$$\n${latex}\n$$\n\n` : `$${latex}$`;
     }
     if (/^h[1-6]$/.test(tag)) return `${'#'.repeat(Number(tag[1]))} ${text()}\n\n`;
     if (tag === 'br') return '\n';
@@ -1249,6 +1253,17 @@
       'M20.385 6.585a2.1 2.1 0 0 0 -2.97 -2.97l-8.415 8.385v3h3l8.385 -8.415',
       'M16 5l3 3',
     ],
+    copy: [
+      'M8 4h11a1 1 0 0 1 1 1v14a1 1 0 0 1 -1 1H8a1 1 0 0 1 -1 -1V5a1 1 0 0 1 1 -1',
+      'M4 16a1 1 0 0 1 -1 -1V3a1 1 0 0 1 1 -1h11',
+    ],
+    queue: [
+      'M4 6h12',
+      'M4 12h9',
+      'M4 18h9',
+      'M18 13v8',
+      'M14 17h8',
+    ],
   });
 
   class PromptLibrary {
@@ -1311,35 +1326,51 @@
       style.textContent = `
         .prompt-view { min-height: 0; display: flex; flex: 1; flex-direction: column; overflow: hidden; }
         .prompt-view[hidden] { display: none !important; }
-        .prompt-toolbar, .session-export-toolbar { display: flex; flex: none; gap: 4px; padding: 4px 5px; border-bottom: 1px solid var(--cgfc-theme-border, var(--border-light, rgba(0,0,0,.1))); }
+        .prompt-toolbar { display: flex; flex: none; align-items: center; gap: 4px; padding: 4px 5px; border-bottom: 1px solid var(--cgfc-theme-border, var(--border-light, rgba(0,0,0,.1))); font-size: 11px; }
         .prompt-toolbar input, .prompt-toolbar select, .prompt-editor input, .prompt-editor textarea { min-width: 0; border: 1px solid var(--cgfc-theme-border, var(--border-light, rgba(0,0,0,.16))); border-radius: 7px; background: var(--cgfc-theme-surface-primary, var(--main-surface-primary, var(--bg-primary, #fff))); color: var(--cgfc-theme-text-primary, var(--text-primary, #161616)); font: inherit; color-scheme: var(--cgfc-color-scheme, light); }
-        .prompt-toolbar input { flex: 1; padding: 4px 6px; }
-        .prompt-toolbar select { max-width: 84px; padding: 3px 4px; }
+        .prompt-toolbar input { flex: 1; width: 0; height: 26px; padding: 3px 6px; }
+        .prompt-toolbar select { max-width: 86px; height: 26px; padding: 2px 3px; }
         .prompt-mini-btn { flex: none; min-height: 27px; padding: 3px 6px; border: 0; border-radius: 7px; background: var(--cgfc-theme-surface-secondary, var(--main-surface-secondary, var(--bg-secondary, #eee))); color: var(--cgfc-theme-text-primary, var(--text-primary, #161616)); font: inherit; cursor: pointer; white-space: nowrap; }
         .prompt-mini-btn:hover { background: color-mix(in srgb, var(--cgfc-theme-text-primary, currentColor) 8%, var(--cgfc-theme-surface-secondary, transparent)); }
         .prompt-mini-btn[hidden] { display: none !important; }
         .prompt-mini-btn.danger { margin-right: auto; background: color-mix(in srgb, #dc2626 14%, var(--cgfc-theme-surface-secondary, var(--main-surface-secondary, var(--bg-secondary, #eee)))); color: #dc2626; }
-        .session-export-toolbar { align-items: center; color: var(--cgfc-theme-text-tertiary, var(--text-tertiary, #777)); font-size: 11px; }
-        .session-export-toolbar > span:first-child { flex: none; white-space: nowrap; }
-        .session-export-toolbar .prompt-mini-btn { min-height: 24px; padding: 2px 5px; font-size: 11px; }
-        .prompt-list { min-height: 0; flex: 1; overflow-y: auto; padding: 6px; scrollbar-width: thin; }
-        .prompt-card { position: relative; margin-bottom: 5px; padding: 8px; border: 1px solid transparent; border-radius: 9px; background: color-mix(in srgb, var(--cgfc-theme-surface-secondary, var(--main-surface-secondary, #eee)) 58%, transparent); cursor: grab; transition: border-color 120ms ease, opacity 120ms ease, transform 120ms ease; }
+        .prompt-tools-menu { position: relative; flex: none; }
+        .prompt-tools-menu > summary { display: grid; width: 26px; height: 26px; place-items: center; list-style: none; border-radius: 7px; background: var(--cgfc-theme-surface-secondary, var(--main-surface-secondary, #eee)); color: inherit; cursor: pointer; }
+        .prompt-tools-menu > summary::-webkit-details-marker { display: none; }
+        .prompt-tools-menu > summary:hover, .prompt-tools-menu > summary:focus-visible { background: color-mix(in srgb, currentColor 10%, var(--cgfc-theme-surface-secondary, #eee)); outline: none; }
+        .prompt-tools-menu > summary svg { width: 17px; height: 17px; fill: currentColor; }
+        .prompt-tools-popover { position: absolute; top: calc(100% + 5px); right: 0; z-index: 10; width: 176px; max-height: min(340px, 65vh); overflow-y: auto; padding: 5px; border: 1px solid var(--cgfc-theme-border, rgba(127,127,127,.25)); border-radius: 10px; background: var(--cgfc-theme-surface-primary, var(--main-surface-primary, #222)); color: var(--cgfc-theme-text-primary, var(--text-primary, #fff)); box-shadow: 0 8px 24px rgba(0,0,0,.22); }
+        .prompt-tools-popover[hidden] { display: none !important; }
+        .prompt-tools-heading { padding: 5px 7px 3px; color: var(--cgfc-theme-text-tertiary, #888); font-size: 10px; font-weight: 600; }
+        .prompt-tools-popover button { display: block; width: 100%; padding: 6px 8px; border: 0; border-radius: 6px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+        .prompt-tools-popover button:hover, .prompt-tools-popover button:focus-visible { background: var(--cgfc-theme-surface-secondary, var(--main-surface-secondary, #333)); outline: none; }
+        .prompt-list { min-height: 0; flex: 1; overflow-y: auto; padding: 6px; }
+        .prompt-list::-webkit-scrollbar { width: 9px; }
+        .prompt-list::-webkit-scrollbar-track { background: #090909; border-radius: 9px; }
+        .prompt-list::-webkit-scrollbar-thumb { border: 2px solid #090909; border-radius: 9px; background: #424242; }
+        .prompt-list::-webkit-scrollbar-thumb:hover { background: #585858; }
+        .prompt-list::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+        .prompt-list::-webkit-scrollbar-corner { background: #090909; }
+        @supports not selector(::-webkit-scrollbar) {
+          .prompt-list { scrollbar-width: thin; scrollbar-color: #424242 #090909; }
+        }
+        .prompt-card { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 52px; column-gap: 5px; margin-bottom: 5px; padding: 8px; border: 1px solid transparent; border-radius: 9px; background: color-mix(in srgb, var(--cgfc-theme-surface-secondary, var(--main-surface-secondary, #eee)) 58%, transparent); cursor: grab; transition: border-color 120ms ease, opacity 120ms ease, transform 120ms ease; }
         .prompt-card[data-pinned="true"] { border-color: color-mix(in srgb, #d99b18 45%, transparent); }
         .prompt-card.dragging { opacity: .42; cursor: grabbing; }
         .prompt-card.drop-before::before, .prompt-card.drop-after::after { position: absolute; right: 5px; left: 5px; z-index: 2; height: 2px; border-radius: 99px; background: #6d5dfc; content: ''; pointer-events: none; }
         .prompt-card.drop-before::before { top: -4px; }
         .prompt-card.drop-after::after { bottom: -4px; }
-        .prompt-card-main { width: 100%; min-width: 0; padding: 0 94px 5px 0; border: 0; background: transparent; color: inherit; text-align: start; cursor: pointer; }
-        .prompt-card-title { display: flex; min-width: 0; gap: 6px; align-items: center; font-weight: 600; }
+        .prompt-card-main { grid-column: 1; grid-row: 1 / span 2; width: 100%; min-width: 0; padding: 0 0 5px; border: 0; background: transparent; color: inherit; text-align: start; cursor: pointer; }
+        .prompt-card-title { display: flex; min-width: 0; min-height: 24px; align-items: center; font-weight: 600; }
         .prompt-card-title-text { display: block; min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .prompt-card-category { flex: none; max-width: 42%; padding: 1px 5px; overflow: hidden; border-radius: 99px; background: color-mix(in srgb, currentColor 9%, transparent); color: var(--cgfc-theme-text-tertiary, var(--text-tertiary, #777)); font-size: 10px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
+        .prompt-card-category { grid-column: 2; grid-row: 2; justify-self: end; align-self: end; max-width: 52px; padding: 1px 5px; overflow: hidden; border-radius: 99px; background: color-mix(in srgb, currentColor 9%, transparent); color: var(--cgfc-theme-text-tertiary, var(--text-tertiary, #777)); font-size: 10px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
         .prompt-card-preview { display: -webkit-box; margin-top: 4px; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; color: var(--cgfc-theme-text-secondary, var(--text-secondary, #555)); font-size: 11.5px; white-space: pre-wrap; }
-        .prompt-card-actions { position: absolute; top: 6px; right: 6px; display: flex; gap: 2px; opacity: 0; visibility: hidden; pointer-events: none; transform: translateY(-2px); transition: opacity 120ms ease, transform 120ms ease, visibility 120ms; }
+        .prompt-card-actions { grid-column: 2; grid-row: 1; display: grid; grid-template-columns: repeat(2, 25px); gap: 2px; align-content: start; opacity: 0; visibility: hidden; pointer-events: none; transform: translateY(-2px); transition: opacity 120ms ease, transform 120ms ease, visibility 120ms; }
         .prompt-card:hover .prompt-card-actions, .prompt-card:focus-within .prompt-card-actions { opacity: 1; visibility: visible; pointer-events: auto; transform: translateY(0); }
-        .prompt-action-btn { display: grid; width: 28px; height: 28px; padding: 0; place-items: center; border: 0; border-radius: 7px; background: color-mix(in srgb, var(--cgfc-theme-surface-primary, var(--main-surface-primary, #fff)) 72%, transparent); color: var(--cgfc-theme-text-secondary, var(--text-secondary, #666)); cursor: pointer; }
+        .prompt-action-btn { display: grid; width: 25px; height: 25px; padding: 0; place-items: center; border: 0; border-radius: 6px; background: color-mix(in srgb, var(--cgfc-theme-surface-primary, var(--main-surface-primary, #fff)) 72%, transparent); color: var(--cgfc-theme-text-secondary, var(--text-secondary, #666)); cursor: pointer; }
         .prompt-action-btn:hover, .prompt-action-btn:focus-visible { background: var(--cgfc-theme-surface-primary, var(--main-surface-primary, var(--bg-primary, #fff))); color: var(--cgfc-theme-text-primary, var(--text-primary, #161616)); outline: none; }
         .prompt-action-btn.active { background: #6d5dfc; color: #fff; }
-        .prompt-action-icon { display: block; width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+        .prompt-action-icon { display: block; width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
         .prompt-empty { padding: 24px 12px; color: var(--cgfc-theme-text-tertiary, var(--text-tertiary, #777)); text-align: center; font-size: 12px; }
         .toc-item[data-unloaded="true"] { color: var(--cgfc-theme-text-tertiary, var(--text-tertiary, #777)); font-style: italic; }
         .prompt-editor { width: min(520px, calc(100vw - 32px)); max-height: calc(100vh - 32px); padding: 0; overflow: hidden; border: 1px solid var(--cgfc-theme-border, var(--border-light, rgba(0,0,0,.18))); border-radius: 12px; background: var(--cgfc-theme-surface-primary, var(--main-surface-primary, var(--bg-primary, #fff))); color: var(--cgfc-theme-text-primary, var(--text-primary, #161616)); pointer-events: auto !important; color-scheme: var(--cgfc-color-scheme, light); }
@@ -1408,32 +1439,61 @@
       this.categorySelect = document.createElement('select');
       this.categorySelect.title = '按分类筛选';
       this.categorySelect.addEventListener('change', () => this.render());
-      toolbar.append(
-        this.searchInput,
-        this.categorySelect,
-        this.makeButton('＋', '新建提示词', () => this.openEditor()),
-        this.makeButton('⇩', '导入提示词 JSON', () => this.importPrompts()),
-        this.makeButton('⇧', '导出提示词 JSON', () => this.exportPrompts()),
-      );
-
-      const exportToolbar = document.createElement('div');
-      exportToolbar.className = 'session-export-toolbar';
-      const label = document.createElement('span');
-      label.textContent = '导出会话';
-      exportToolbar.append(
-        label,
-        this.makeButton('MD', '导出 Markdown', () => runtime.sessionExporter.download('markdown')),
-        this.makeButton('JSON', '导出 JSON', () => runtime.sessionExporter.download('json')),
-        this.makeButton('TXT', '导出纯文本', () => runtime.sessionExporter.download('txt')),
-        this.makeButton('复制 MD', '复制完整会话 Markdown', async () => {
+      const toolsMenu = document.createElement('details');
+      toolsMenu.className = 'prompt-tools-menu';
+      const toolsTrigger = document.createElement('summary');
+      toolsTrigger.title = '提示词与会话操作';
+      toolsTrigger.setAttribute('aria-label', toolsTrigger.title);
+      toolsTrigger.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/></svg>';
+      const toolsPopover = document.createElement('div');
+      toolsPopover.className = 'prompt-tools-popover';
+      const addGroup = (heading, entries) => {
+        const title = document.createElement('div');
+        title.className = 'prompt-tools-heading';
+        title.textContent = heading;
+        toolsPopover.appendChild(title);
+        for (const [label, handler] of entries) {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.textContent = label;
+          button.addEventListener('click', () => {
+            toolsMenu.open = false;
+            handler();
+          });
+          toolsPopover.appendChild(button);
+        }
+      };
+      addGroup('提示词', [
+        ['新建提示词', () => this.openEditor()],
+        ['导入提示词 JSON', () => this.importPrompts()],
+        ['导出提示词 JSON', () => this.exportPrompts()],
+      ]);
+      addGroup('导出会话', [
+        ['下载 Markdown', () => runtime.sessionExporter.download('markdown')],
+        ['下载 JSON', () => runtime.sessionExporter.download('json')],
+        ['下载纯文本', () => runtime.sessionExporter.download('txt')],
+        ['复制完整会话 MD', async () => {
           const ok = await runtime.sessionExporter.copyMarkdown();
           if (!ok) window.alert('暂未找到可复制的会话内容。');
-        }),
-      );
+        }],
+      ]);
+      toolsMenu.append(toolsTrigger, toolsPopover);
+      toolbar.append(this.searchInput, this.categorySelect, toolsMenu);
+      this.toolbarMenuAbort?.abort();
+      this.toolbarMenuAbort = new AbortController();
+      document.addEventListener('pointerdown', (event) => {
+        if (toolsMenu.open && !event.composedPath().includes(toolsMenu)) toolsMenu.open = false;
+      }, { capture: true, signal: this.toolbarMenuAbort.signal });
+      toolsMenu.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+          toolsMenu.open = false;
+          toolsTrigger.focus();
+        }
+      });
 
       this.list = document.createElement('div');
       this.list.className = 'prompt-list';
-      this.nav.append(toolbar, exportToolbar, this.list);
+      this.nav.append(toolbar, this.list);
       this.buildEditor();
     }
 
@@ -1626,7 +1686,7 @@
       const category = document.createElement('span');
       category.className = 'prompt-card-category';
       category.textContent = item.category;
-      title.append(titleText, category);
+      title.appendChild(titleText);
       const preview = document.createElement('div');
       preview.className = 'prompt-card-preview';
       preview.textContent = item.content;
@@ -1648,7 +1708,21 @@
         pin,
         this.makeIconButton('edit', '编辑', () => this.openEditor(item)),
       );
-      card.append(main, actions);
+      const copy = this.makeIconButton('copy', '复制提示词原文', async () => {
+        const ok = await this.copyText(item.content);
+        copy.classList.toggle('active', ok);
+        copy.title = ok ? '已复制' : '复制失败';
+        copy.setAttribute('aria-label', copy.title);
+        setTimeout(() => {
+          if (!copy.isConnected) return;
+          copy.classList.remove('active');
+          copy.title = '复制提示词原文';
+          copy.setAttribute('aria-label', copy.title);
+        }, 1500);
+      });
+      const queue = this.makeIconButton('queue', '加入发送队列', () => this.queuePrompt(item));
+      actions.append(copy, queue);
+      card.append(main, actions, category);
       card.addEventListener('dragstart', (event) => this.handlePromptDragStart(event, item, card));
       card.addEventListener('dragover', (event) => this.handlePromptDragOver(event, item, card));
       card.addEventListener('dragleave', (event) => {
@@ -1810,7 +1884,9 @@
         if (!selection.rangeCount || !composer.contains(selection.anchorNode)) placeCaretAtEnd();
 
         const beforeText = composer.textContent || '';
-        try {
+        // Long prompts bypass the synthetic beforeinput attempt. Otherwise the
+        // editor may parse the same large payload again through execCommand.
+        if (text.length < 4096) try {
           // ChatGPT 的 ProseMirror 会处理 beforeinput；先走它自己的编辑事务，
           // 可避免“DOM 看似写入后又被 React 状态还原”。
           composer.dispatchEvent(new ownerWindow.InputEvent('beforeinput', {
@@ -2169,13 +2245,16 @@
     async copyText(text) {
       try {
         await navigator.clipboard.writeText(text);
+        return true;
       } catch {
         const textarea = document.createElement('textarea');
-        textarea.value = text;
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand('copy');
-        textarea.remove();
+        try {
+          textarea.value = text;
+          document.body.appendChild(textarea);
+          textarea.select();
+          return document.execCommand('copy');
+        } catch { return false; }
+        finally { textarea.remove(); }
       }
     }
 
@@ -3583,6 +3662,76 @@
   runtime.messageQueue.start();
   runtime.composerQueueDock = runtime.composerQueueDock || new ComposerQueueDock(runtime);
   runtime.composerQueueDock.start();
+
+  function startMessageMarkdownCopy() {
+    const selector = 'main [data-message-author-role="assistant"]';
+    const className = 'cgpt-unified-copy-message-md';
+    const style = document.createElement('style');
+    style.textContent = `
+      .${className} { display: inline-grid; width: 32px; height: 32px; margin: 7px 0 3px;
+        padding: 0; place-items: center; border: 0; border-radius: 8px;
+        background: transparent; color: var(--cgfc-message-copy-icon-color, currentColor); cursor: pointer; }
+      .${className}:hover, .${className}:focus-visible {
+        background: var(--main-surface-secondary, rgba(127,127,127,.16)); outline: none; }
+      .${className}[data-copied="true"] { color: var(--cgfc-message-copy-icon-color, #6d5dfc);
+        background: color-mix(in srgb, currentColor 12%, transparent); }
+      .${className} svg { width: 20px; height: 20px; fill: none; stroke: currentColor;
+        stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
+    `;
+    const addButton = (answer) => {
+      if (!(answer instanceof Element) || answer.querySelector(`.${className}`)) return;
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = className;
+      button.title = '复制这条回答的 Markdown，保留公式 LaTeX';
+      button.setAttribute('aria-label', button.title);
+      const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      icon.setAttribute('viewBox', '0 0 24 24');
+      icon.setAttribute('aria-hidden', 'true');
+      const back = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      back.setAttribute('d', 'M8 4h11a1 1 0 0 1 1 1v14a1 1 0 0 1 -1 1H8a1 1 0 0 1 -1 -1V5a1 1 0 0 1 1 -1');
+      const front = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      front.setAttribute('d', 'M4 16a1 1 0 0 1 -1 -1V3a1 1 0 0 1 1 -1h11');
+      icon.append(back, front);
+      button.appendChild(icon);
+      button.addEventListener('click', async (event) => {
+        event.stopPropagation();
+        const markdown = runtime.sessionExporter.extractContent(answer);
+        const ok = Boolean(markdown) && await runtime.promptLibrary.copyText(markdown);
+        button.dataset.copied = String(ok);
+        button.title = ok ? '已复制 Markdown' : '复制失败';
+        button.setAttribute('aria-label', button.title);
+        setTimeout(() => {
+          if (!button.isConnected) return;
+          delete button.dataset.copied;
+          button.title = '复制这条回答的 Markdown，保留公式 LaTeX';
+          button.setAttribute('aria-label', button.title);
+        }, 1600);
+      });
+      answer.appendChild(button);
+    };
+    const scan = (root) => {
+      if (!(root instanceof Element)) return;
+      if (root.matches(selector)) addButton(root);
+      root.querySelectorAll(selector).forEach(addButton);
+    };
+    const start = () => {
+      (document.head || document.documentElement).appendChild(style);
+      scan(document.documentElement);
+      const observer = new MutationObserver((records) => {
+        for (const record of records) {
+          const answer = record.target instanceof Element
+            ? record.target.closest(selector) : record.target.parentElement?.closest(selector);
+          if (answer) addButton(answer);
+          for (const node of record.addedNodes) if (node instanceof Element) scan(node);
+        }
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+    };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
+    else start();
+  }
+  startMessageMarkdownCopy();
 })();
 
 /* ===== Module 1: long-chat performance + adaptive navigation ===== */
@@ -9881,6 +10030,7 @@
     enableFormulaCopy: true,
     formulaCopyDelimiters: true,
     formulaCopyBorderColor: '#6d5dfc',
+    messageCopyIconColor: '#6d5dfc',
     toolboxFont: '"Segoe UI", "Microsoft YaHei", sans-serif',
     toolboxFontSize: 13,
     toolboxLineHeight: 1.4,
@@ -9923,7 +10073,7 @@
     'mathFont', 'mathFontMode', 'codeFont',
     'fontSize', 'lineHeight', 'codeFontSize', 'codeLineHeight',
     'normalColor', 'boldColor', 'boldWeight',
-    'fontSmoothingMode', 'textRenderingMode', 'formulaCopyBorderColor',
+    'fontSmoothingMode', 'textRenderingMode', 'formulaCopyBorderColor', 'messageCopyIconColor',
     'toolboxFont', 'toolboxFontSize', 'toolboxLineHeight', 'toolboxPanelWidth',
     'toolboxTextColor', 'toolboxBackgroundColor', 'toolboxAccentColor', 'toolboxOpacity',
     'queueFont', 'queueFontSize', 'queueLineHeight', 'queuePanelWidth',
@@ -9931,7 +10081,7 @@
     'tokenSummaryTextColor', 'tokenSummaryBackgroundColor', 'tokenSummaryBorderColor',
   ]);
   const DEFAULT_DISABLED_OVERRIDE_KEYS = new Set([
-    'normalColor', 'boldColor',
+    'normalColor', 'boldColor', 'messageCopyIconColor',
     'toolboxTextColor', 'toolboxBackgroundColor', 'toolboxAccentColor', 'toolboxOpacity',
     'queueTextColor', 'queueBackgroundColor', 'queueAccentColor', 'queueOpacity',
     'tokenSummaryTextColor', 'tokenSummaryBackgroundColor', 'tokenSummaryBorderColor',
@@ -9966,6 +10116,7 @@
     enableFormulaCopy: 'boolean',
     formulaCopyDelimiters: 'boolean',
     formulaCopyBorderColor: 'color',
+    messageCopyIconColor: 'color',
     toolboxFont: 'text',
     toolboxFontSize: 'number',
     toolboxLineHeight: 'number',
@@ -10497,6 +10648,7 @@
     root.removeAttribute('data-cgfc-font-smoothing');
 
     setOrRemove('--cgfc-formula-copy-border-color', enabled('formulaCopyBorderColor'), normalizeSetting('formulaCopyBorderColor', settings.formulaCopyBorderColor));
+    setOrRemove('--cgfc-message-copy-icon-color', enabled('messageCopyIconColor'), normalizeSetting('messageCopyIconColor', settings.messageCopyIconColor));
 
     const applyWidgetBase = (prefix) => {
       setOrRemove(`--cgfc-${prefix}-font`, enabled(`${prefix}Font`), sanitizeFontStack(settings[`${prefix}Font`], defaults[`${prefix}Font`]));
@@ -11785,6 +11937,7 @@
     appendControl(panel, { label: '双击公式复制 LaTeX', key: 'enableFormulaCopy', type: 'checkbox' });
     appendControl(panel, { label: '复制公式时保留 $ / $$ 定界符', key: 'formulaCopyDelimiters', type: 'checkbox' });
     appendControl(panel, { label: '公式复制边框颜色', key: 'formulaCopyBorderColor', type: 'color' });
+    appendControl(panel, { label: '回答复制 MD 图标颜色', key: 'messageCopyIconColor', type: 'color' });
     const formulaCopyHint = document.createElement('p');
     formulaCopyHint.className = 'cgfc-hint';
     formulaCopyHint.textContent = '参考 Ophel Atlas：优先读取 KaTeX 内置的 application/x-tex 原始源码；行内公式复制为 $...$，块公式复制为 $$...$$。';
@@ -12389,13 +12542,16 @@
   }
 
   function unwrapFormulaDelimiters(value) {
-    const text = String(value || '').trim();
+    let text = String(value || '').trim();
     if (!text) return '';
     const pairs = [['$$', '$$'], ['\\(', '\\)'], ['\\[', '\\]'], ['$', '$']];
-    for (const [open, close] of pairs) {
-      if (text.startsWith(open) && text.endsWith(close) && text.length > open.length + close.length) {
-        return text.slice(open.length, text.length - close.length).trim();
-      }
+    for (let depth = 0; depth < 4; depth += 1) {
+      const pair = pairs.find(([open, close]) =>
+        text.startsWith(open) && text.endsWith(close) && text.length > open.length + close.length);
+      if (!pair) break;
+      const inner = text.slice(pair[0].length, text.length - pair[1].length).trim();
+      if (!inner) break;
+      text = inner;
     }
     return text;
   }
@@ -12462,12 +12618,11 @@
   }
 
   function formatFormulaCopy(payload) {
-    const latex = String(payload?.latex || '').replace(/\r\n?/g, '\n').trim();
+    const latex = unwrapFormulaDelimiters(String(payload?.latex || '').replace(/\r\n?/g, '\n'));
     if (!latex) return '';
     if (!settings.formulaCopyDelimiters) return latex;
     if (!payload.isBlock) return `$${latex}$`;
-    const needsMultiline = latex.includes('\n') || /(^|[^\\])\\\\($|[^\\])/.test(latex);
-    return needsMultiline ? `$$\n${latex}\n$$` : `$$${latex}$$`;
+    return `$$\n${latex}\n$$`;
   }
 
   async function writeClipboardText(text) {
