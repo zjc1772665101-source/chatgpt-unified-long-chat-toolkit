@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT 长对话统一工具箱（性能·导航·提示词·导出·排版）
 // @namespace    local.codex.chatgpt.unified
-// @version      1.6.10
-// @description  ChatGPT 长对话性能、导航、提示词、导出与排版工具箱；v1.6.10 调整提示词列表滚动条外观。
+// @version      1.6.17
+// @description  ChatGPT 长对话性能、导航、提示词、导出与排版工具箱；v1.6.17 移除思考概览 Token 标记并修复跨节点公式。
 // @author       Codex；含 Alex S Hamilton 的 ChatGPT Lazy Chat++（GPL-3.0-or-later）
 // @homepageURL  https://github.com/zjc1772665101-source/chatgpt-unified-long-chat-toolkit
 // @supportURL   https://github.com/zjc1772665101-source/chatgpt-unified-long-chat-toolkit/issues
@@ -33,7 +33,61 @@
   const PROMPT_STORAGE_KEY = 'cgpt-unified-prompt-library-v1';
   const runtime = globalThis[RUNTIME_KEY] || (globalThis[RUNTIME_KEY] = {});
 
-  runtime.version = '1.6.10';
+  runtime.version = '1.6.17';
+  // Prefer semantic attributes over generated CSS class names. New ChatGPT
+  // renders a user/assistant pair under data-turn-key without legacy role nodes.
+  const dom = runtime.dom = Object.freeze({
+    assistant: ':is([data-message-author-role="assistant"], [data-markdown-text-style="assistant-message"]:not([data-message-author-role] *))',
+    user: ':is([data-message-author-role="user"], [data-user-message-bubble]:not([data-message-author-role] *))',
+    message: ':is([data-message-author-role], [data-markdown-text-style="assistant-message"]:not([data-message-author-role] *), [data-user-message-bubble]:not([data-message-author-role] *))',
+    content: ':is(.markdown, .prose, [data-markdown-text-style="assistant-message"], [data-markdown-text-style="user-message"])',
+    turn: ':is([data-testid^="conversation-turn-"], [data-turn-key])',
+    role(node) {
+      return node?.getAttribute?.('data-message-author-role')
+        || (node?.matches?.('[data-user-message-bubble]') ? 'user' : '')
+        || (node?.matches?.('[data-markdown-text-style="assistant-message"]') ? 'assistant' : '');
+    },
+    isThinkingOverview(node) {
+      return node instanceof Element && (
+        node.matches('[data-markdown-text-tone="tertiary"]')
+        || Boolean(node.closest('[data-chatgpt-agent-turn-start] + *'))
+      );
+    },
+    messageId(node) {
+      return node?.closest?.('[data-message-id]')?.getAttribute('data-message-id')
+        || node?.closest?.('[data-chatgpt-selection-message-id]')?.getAttribute('data-chatgpt-selection-message-id')
+        || node?.closest?.('[data-chatgpt-search-message-ids]')?.getAttribute('data-chatgpt-search-message-ids')?.trim().split(/\s+/)[0]
+        || (this.role(node) === 'user' ? node?.closest?.('[data-turn-key]')?.getAttribute('data-turn-key') : '')
+        || '';
+    },
+    contentRoot(node) {
+      if (!(node instanceof Element)) return null;
+      return node.matches(this.content) ? node
+        : node.querySelector(`${this.content}, [data-message-content], .whitespace-pre-wrap`) || node;
+    },
+    messageText(node) {
+      const source = this.contentRoot(node);
+      if (!source) return '';
+      return Array.from(source.childNodes, (child) => child instanceof Element
+        && child.matches('[data-cgpt-token-chip], .cgpt-unified-copy-message-md')
+        ? '' : child.textContent || '').join('');
+    },
+    messages(root = document.querySelector('main')) {
+      if (!root) return [];
+      const nodes = [...(root.matches?.(this.message) ? [root] : []), ...root.querySelectorAll(this.message)];
+      return nodes.filter((node) => ['user', 'assistant'].includes(this.role(node))
+        && !node.parentElement?.closest(this.message));
+    },
+    scrollBounds(element) {
+      const extent = Math.max(0, element.scrollHeight - element.clientHeight);
+      return getComputedStyle(element).flexDirection === 'column-reverse'
+        ? { min: -extent, max: 0 } : { min: 0, max: extent };
+    },
+    clampScrollTop(element, value) {
+      const { min, max } = this.scrollBounds(element);
+      return Math.min(max, Math.max(min, value));
+    },
+  });
   runtime.lazy = runtime.lazy || null;
   runtime.navigationLeaseTimer = 0;
   runtime.beginNavigationLease = (duration = 3200) => {
@@ -67,7 +121,7 @@
   function nodeToMarkdown(node, depth = 0) {
     if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || '';
     if (!(node instanceof Element)) return '';
-    if (node.matches('button, script, style, svg, [aria-hidden="true"], [role="tooltip"]')) return '';
+    if (node.matches('button, script, style, svg, [aria-hidden="true"], [role="tooltip"], [data-cgpt-token-chip]')) return '';
 
     const tag = node.tagName.toLowerCase();
     const children = () => Array.from(node.childNodes).map((child) => nodeToMarkdown(child, depth)).join('');
@@ -77,8 +131,8 @@
       const latex = node.querySelector('annotation[encoding="application/x-tex"]')?.textContent?.trim()
         || node.getAttribute('data-latex')
         || node.getAttribute('data-math-source');
-      const isBlock = node.matches('.katex-display, .math-block, math[display="block"]')
-        || Boolean(node.closest('.katex-display, .math-block'));
+      const isBlock = node.matches('.katex-display, .math-block, math[display="block"], [data-math-display="true"]')
+        || Boolean(node.closest('.katex-display, .math-block, [data-math-display="true"]'));
       if (latex) return isBlock ? `\n$$\n${latex}\n$$\n\n` : `$${latex}$`;
     }
     if (/^h[1-6]$/.test(tag)) return `${'#'.repeat(Number(tag[1]))} ${text()}\n\n`;
@@ -90,7 +144,8 @@
     }
     if (tag === 'strong' || tag === 'b') return `**${text()}**`;
     if (tag === 'em' || tag === 'i') return `*${text()}*`;
-    if (tag === 'code' && node.parentElement?.tagName.toLowerCase() !== 'pre') return `\`${children()}\``;
+    if ((tag === 'code' && node.parentElement?.tagName.toLowerCase() !== 'pre')
+      || node.matches('[data-markdown-copy="inline-code"]')) return `\`${children()}\``;
     if (tag === 'pre') {
       const code = node.querySelector('code')?.textContent ?? node.textContent ?? '';
       const language = node.querySelector('code')?.className.match(/language-([\w+-]+)/)?.[1] || '';
@@ -186,7 +241,7 @@
       const bridged = runtime.lazy?.getAllTurnNodes?.();
       const turns = Array.isArray(bridged) && bridged.length
         ? bridged
-        : Array.from(document.querySelectorAll('main [data-testid^="conversation-turn-"]'));
+        : Array.from(document.querySelectorAll(`main ${dom.turn}`));
       const seen = new Set();
       return turns
         .filter((turn) => turn instanceof Element && !seen.has(turn) && seen.add(turn))
@@ -196,7 +251,7 @@
     }
 
     extractContent(roleNode) {
-      const source = roleNode.querySelector('.markdown, [data-message-content], .whitespace-pre-wrap') || roleNode;
+      const source = dom.contentRoot(roleNode);
       const markdown = normalizeText(nodeToMarkdown(source));
       return markdown || normalizeText(source.textContent);
     }
@@ -205,14 +260,11 @@
       const messages = [];
       const seen = new Set();
       for (const turn of this.getTurnNodes()) {
-        let roleNodes = Array.from(turn.querySelectorAll('[data-message-author-role]'));
-        if (turn.matches('[data-message-author-role]')) roleNodes.unshift(turn);
-        roleNodes = roleNodes.filter((node) => !node.parentElement?.closest('[data-message-author-role]'));
+        const roleNodes = dom.messages(turn);
         for (const roleNode of roleNodes) {
-          const role = roleNode.getAttribute('data-message-author-role');
+          const role = dom.role(roleNode);
           if (role !== 'user' && role !== 'assistant') continue;
-          const messageId = roleNode.getAttribute('data-message-id')
-            || roleNode.closest('[data-message-id]')?.getAttribute('data-message-id')
+          const messageId = dom.messageId(roleNode)
             || `${turn.getAttribute('data-testid') || messages.length}:${role}`;
           if (seen.has(messageId)) continue;
           const content = this.extractContent(roleNode);
@@ -671,6 +723,13 @@
       this.positionRaf = 0;
       this.lastGenerating = false;
       this.apiFailureKey = '';
+      this.messageStatsCache = new WeakMap();
+      this.apiTokenCache = new Map();
+      this.statsConversationId = null;
+      this.refreshEpoch = 0;
+      this.refreshing = false;
+      this.refreshPending = false;
+      this.forceApiPending = false;
       this.onSettingsChange = () => {
         this.syncEnabledState();
         if (this.active) {
@@ -776,6 +835,12 @@
 
     stop() {
       this.active = false;
+      this.refreshEpoch += 1;
+      this.refreshPending = false;
+      this.forceApiPending = false;
+      this.messageStatsCache = new WeakMap();
+      this.apiTokenCache.clear();
+      this.statsConversationId = null;
       clearInterval(this.refreshTimer);
       clearTimeout(this.mutationTimer);
       if (this.positionRaf) cancelAnimationFrame(this.positionRaf);
@@ -811,8 +876,14 @@
       if (!target || target === this.observationRoot) return;
       this.observer?.disconnect();
       this.observationRoot = target;
+      this.messageStatsCache = new WeakMap();
       this.observer = new MutationObserver((records) => {
-        const externalChange = records.some((record) => !this.isOwnMutation(record));
+        let externalChange = false;
+        for (const record of records) {
+          if (this.isOwnMutation(record)) continue;
+          externalChange = true;
+          this.invalidateMessageStats(record);
+        }
         if (!externalChange) return;
         const generating = this.isGenerating();
         const justFinished = this.lastGenerating && !generating;
@@ -820,6 +891,22 @@
         this.scheduleRefresh(justFinished);
       });
       this.observer.observe(target, { childList: true, subtree: true, characterData: true });
+    }
+
+    invalidateMessageStats(record) {
+      const target = record.target?.nodeType === Node.ELEMENT_NODE
+        ? record.target
+        : record.target?.parentElement;
+      const roleNode = target?.closest?.(dom.message);
+      if (roleNode) this.messageStatsCache.delete(roleNode);
+      // Restored/virtualized turns may have changed while outside the observer.
+      for (const node of record.addedNodes || []) {
+        if (!(node instanceof Element)) continue;
+        if (node.matches(dom.message)) this.messageStatsCache.delete(node);
+        for (const role of node.querySelectorAll(dom.message)) {
+          this.messageStatsCache.delete(role);
+        }
+      }
     }
 
     isOwnMutation(record) {
@@ -878,34 +965,48 @@
     }
 
     withTokenCounts(messages) {
-      return (Array.isArray(messages) ? messages : []).map((message) => ({
-        ...message,
-        tokens: this.estimateTokens(message.content),
-      }));
+      const nextCache = new Map();
+      const counted = (Array.isArray(messages) ? messages : []).map((message) => {
+        const key = message.id || message;
+        const cached = this.apiTokenCache.get(key);
+        const stats = cached && cached.content === message.content
+          ? cached
+          : { content: message.content, tokens: this.estimateTokens(message.content) };
+        nextCache.set(key, stats);
+        return { ...message, tokens: stats.tokens };
+      });
+      // Drop messages from abandoned branches instead of retaining every visited turn.
+      this.apiTokenCache = nextCache;
+      return counted;
     }
 
     getAttachedRoleNodes() {
-      return Array.from(document.querySelectorAll('main [data-message-author-role]')).filter((node) => {
-        const role = node.getAttribute('data-message-author-role');
-        return (role === 'user' || role === 'assistant') && !node.parentElement?.closest('[data-message-author-role]');
-      });
+      return dom.messages();
     }
 
     extractAttachedContent(roleNode) {
-      const source = roleNode.querySelector('.markdown, [data-message-content], .whitespace-pre-wrap') || roleNode;
+      const source = dom.contentRoot(roleNode);
       const clone = source.cloneNode(true);
       clone.querySelectorAll?.(`[${this.chipAttr}]`).forEach((node) => node.remove());
       return normalizeText(clone.innerText || clone.textContent || '');
     }
 
-    collectAttachedMessages() {
-      return this.getAttachedRoleNodes().map((node, index) => {
-        const role = node.getAttribute('data-message-author-role');
-        const id = node.getAttribute('data-message-id')
-          || node.closest('[data-message-id]')?.getAttribute('data-message-id')
+    getMessageStats(roleNode) {
+      let stats = this.messageStatsCache.get(roleNode);
+      if (!stats) {
+        const content = this.extractAttachedContent(roleNode);
+        stats = { content, tokens: this.estimateTokens(content) };
+        this.messageStatsCache.set(roleNode, stats);
+      }
+      return stats;
+    }
+
+    collectAttachedMessages(roleNodes = this.getAttachedRoleNodes()) {
+      return roleNodes.map((node, index) => {
+        const role = dom.role(node);
+        const id = dom.messageId(node)
           || `dom-${index}`;
-        const content = this.extractAttachedContent(node);
-        return { id, role, content, tokens: this.estimateTokens(content) };
+        return { id, role, ...this.getMessageStats(node) };
       }).filter((message) => message.content);
     }
 
@@ -1003,10 +1104,15 @@
       const input = this.formatCount(round.input);
       const output = this.formatCount(round.output);
       const context = this.formatCount(total);
-      root.querySelector('[data-slot="input"]').textContent = `输入 ≈${input} tok`;
-      root.querySelector('[data-slot="output"]').textContent = `输出 ≈${output} tok`;
-      root.querySelector('[data-slot="context"]').textContent = `可见上下文 ≈${context} tok`;
-      root.querySelector('[data-slot="compact"]').textContent = `${input}/${output}/${context}`;
+      for (const [slot, value] of Object.entries({
+        input: `输入 ≈${input} tok`,
+        output: `输出 ≈${output} tok`,
+        context: `可见上下文 ≈${context} tok`,
+        compact: `${input}/${output}/${context}`,
+      })) {
+        const node = root.querySelector(`[data-slot="${slot}"]`);
+        if (node && node.textContent !== value) node.textContent = value;
+      }
       const pill = root.querySelector('.cgpt-token-pill');
       const title = `可见文本 Token 估算：输入 ≈${input}，输出 ≈${output}，可见上下文 ≈${context}。不包含系统指令、记忆、工具定义、隐藏推理等服务端上下文，因此不是官方 usage。`;
       pill?.setAttribute('title', title);
@@ -1017,15 +1123,22 @@
       this.schedulePosition();
     }
 
-    renderMessageChips() {
+    renderMessageChips(roleNodes = this.getAttachedRoleNodes()) {
       if (!this.showMessageChips()) {
         this.removeMessageChips();
         return;
       }
-      for (const roleNode of this.getAttachedRoleNodes()) {
-        const content = this.extractAttachedContent(roleNode);
-        if (!content) continue;
-        const value = `≈${this.formatCount(this.estimateTokens(content))} tok`;
+      for (const roleNode of roleNodes) {
+        if (dom.isThinkingOverview(roleNode)) {
+          roleNode.querySelector(`:scope > [${this.chipAttr}]`)?.remove();
+          continue;
+        }
+        const stats = this.getMessageStats(roleNode);
+        if (!stats.content) {
+          roleNode.querySelector(`:scope > [${this.chipAttr}]`)?.remove();
+          continue;
+        }
+        const value = `≈${this.formatCount(stats.tokens)} tok`;
         let chip = roleNode.querySelector(`:scope > [${this.chipAttr}]`);
         if (!chip) {
           chip = document.createElement('span');
@@ -1168,7 +1281,14 @@
 
     async refresh({ forceApi = false } = {}) {
       if (!this.active || !this.isEnabled()) return;
-      if (!this.exporter.getConversationId()) {
+      const conversationId = this.exporter.getConversationId();
+      const epoch = this.refreshEpoch;
+      if (conversationId !== this.statsConversationId) {
+        this.statsConversationId = conversationId;
+        this.messageStatsCache = new WeakMap();
+        this.apiTokenCache.clear();
+      }
+      if (!conversationId) {
         this.removeUi();
         return;
       }
@@ -1178,19 +1298,22 @@
         this.removeUi();
         return;
       }
-      if (showChips) this.renderMessageChips();
+      const roleNodes = this.getAttachedRoleNodes();
+      if (showChips) this.renderMessageChips(roleNodes);
       else this.removeMessageChips();
       if (!showSummary) {
         this.removeSummary();
         return;
       }
-      const domMessages = this.collectAttachedMessages();
+      const domMessages = this.collectAttachedMessages(roleNodes);
       let apiMessages = [];
       try {
         let result = this.exporter.getCachedActiveMessagesSync?.() || null;
         if (forceApi || !result) {
           result = await this.exporter.getActiveMessages({ force: forceApi, maxAgeMs: this.apiMaxAgeMs });
         }
+        if (!this.active || !this.isEnabled() || epoch !== this.refreshEpoch
+          || this.exporter.getConversationId() !== conversationId) return;
         apiMessages = this.withTokenCounts(result?.messages || []);
         this.apiFailureKey = '';
       } catch (error) {
@@ -1200,6 +1323,8 @@
           console.debug('[Token Stats] 完整会话缓存暂不可用，回退到当前 DOM：', error);
         }
       }
+      if (!this.active || !this.isEnabled() || epoch !== this.refreshEpoch
+        || this.exporter.getConversationId() !== conversationId) return;
       const generating = this.isGenerating();
       this.lastGenerating = generating;
       const messages = generating
@@ -1210,9 +1335,25 @@
 
     scheduleRefresh(forceApi = false) {
       if (!this.active) return;
-      clearTimeout(this.mutationTimer);
-      this.mutationTimer = window.setTimeout(() => {
-        this.refresh({ forceApi }).catch((error) => console.debug('[Token Stats] refresh failed:', error));
+      this.refreshPending = true;
+      this.forceApiPending ||= forceApi;
+      if (this.mutationTimer || this.refreshing) return;
+      // Coalesce streaming bursts without postponing the refresh indefinitely.
+      this.mutationTimer = window.setTimeout(async () => {
+        this.mutationTimer = 0;
+        if (!this.active) return;
+        const force = this.forceApiPending;
+        this.refreshPending = false;
+        this.forceApiPending = false;
+        this.refreshing = true;
+        try {
+          await this.refresh({ forceApi: force });
+        } catch (error) {
+          console.debug('[Token Stats] refresh failed:', error);
+        } finally {
+          this.refreshing = false;
+          if (this.active && this.refreshPending) this.scheduleRefresh();
+        }
       }, this.domDebounceMs);
     }
   }
@@ -1279,6 +1420,7 @@
       this.onCountChange = null;
       this.draggedPromptId = null;
       this.suppressPromptClickUntil = 0;
+      this.promptViews = new WeakMap();
     }
 
     normalizeLibrary(value) {
@@ -1346,13 +1488,13 @@
         .prompt-tools-popover button:hover, .prompt-tools-popover button:focus-visible { background: var(--cgfc-theme-surface-secondary, var(--main-surface-secondary, #333)); outline: none; }
         .prompt-list { min-height: 0; flex: 1; overflow-y: auto; padding: 6px; }
         .prompt-list::-webkit-scrollbar { width: 9px; }
-        .prompt-list::-webkit-scrollbar-track { background: #090909; border-radius: 9px; }
-        .prompt-list::-webkit-scrollbar-thumb { border: 2px solid #090909; border-radius: 9px; background: #424242; }
-        .prompt-list::-webkit-scrollbar-thumb:hover { background: #585858; }
+        .prompt-list::-webkit-scrollbar-track { background: transparent; border-radius: 9px; }
+        .prompt-list::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 9px; background: #424242; background-clip: padding-box; }
+        .prompt-list::-webkit-scrollbar-thumb:hover { background-color: #585858; }
         .prompt-list::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
-        .prompt-list::-webkit-scrollbar-corner { background: #090909; }
+        .prompt-list::-webkit-scrollbar-corner { background: transparent; }
         @supports not selector(::-webkit-scrollbar) {
-          .prompt-list { scrollbar-width: thin; scrollbar-color: #424242 #090909; }
+          .prompt-list { scrollbar-width: thin; scrollbar-color: #424242 transparent; }
         }
         .prompt-card { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 52px; column-gap: 5px; margin-bottom: 5px; padding: 8px; border: 1px solid transparent; border-radius: 9px; background: color-mix(in srgb, var(--cgfc-theme-surface-secondary, var(--main-surface-secondary, #eee)) 58%, transparent); cursor: grab; transition: border-color 120ms ease, opacity 120ms ease, transform 120ms ease; }
         .prompt-card[data-pinned="true"] { border-color: color-mix(in srgb, #d99b18 45%, transparent); }
@@ -1386,6 +1528,13 @@
         }
         @media (prefers-reduced-motion: reduce) {
           .prompt-card, .prompt-card-actions { transition: none; }
+        }
+        @container (max-width: 219px) {
+          .prompt-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) 26px; gap: 4px; }
+          .prompt-toolbar input { grid-column: 1 / -1; width: 100%; }
+          .prompt-toolbar select { grid-column: 1; width: 100%; max-width: none; }
+          .prompt-tools-menu { grid-column: 2; }
+          .prompt-card { padding: 6px; }
         }
       `;
       this.shadow.appendChild(style);
@@ -1557,9 +1706,24 @@
     refreshCategories() {
       const current = this.categorySelect.value;
       const categories = [...new Set(this.prompts.map((item) => item.category))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+      const options = this.categorySelect.options;
+      if (options.length === categories.length + 1
+        && options[0].value === ''
+        && categories.every((category, index) => options[index + 1].value === category)) return;
       this.categorySelect.replaceChildren(new Option('全部分类', ''));
       categories.forEach((category) => this.categorySelect.appendChild(new Option(category, category)));
       this.categorySelect.value = categories.includes(current) ? current : '';
+    }
+
+    getPromptView(item) {
+      let view = this.promptViews.get(item);
+      if (!view || view.title !== item.title || view.category !== item.category
+        || view.content !== item.content || view.pinned !== item.pinned) {
+        view = { title: item.title, category: item.category, content: item.content, pinned: item.pinned,
+          searchText: null, card: null };
+        this.promptViews.set(item, view);
+      }
+      return view;
     }
 
     filteredPrompts() {
@@ -1568,7 +1732,9 @@
       return this.prompts.filter((item) => {
         if (category && item.category !== category) return false;
         if (!query) return true;
-        return `${item.title}\n${item.category}\n${item.content}`.toLocaleLowerCase().includes(query);
+        const view = this.getPromptView(item);
+        view.searchText ??= `${item.title}\n${item.category}\n${item.content}`.toLocaleLowerCase();
+        return view.searchText.includes(query);
       }).sort((a, b) => a.order - b.order || a.title.localeCompare(b.title, 'zh-CN'));
     }
 
@@ -1662,7 +1828,11 @@
         empty.textContent = this.prompts.length ? '没有匹配的提示词' : '还没有提示词。点击“＋”创建。';
         fragment.appendChild(empty);
       }
-      items.forEach((item) => fragment.appendChild(this.renderCard(item)));
+      items.forEach((item) => {
+        const view = this.getPromptView(item);
+        view.card ||= this.renderCard(item);
+        fragment.appendChild(view.card);
+      });
       this.list.replaceChildren(fragment);
     }
 
@@ -1833,8 +2003,8 @@
         let value = 0;
         if (element.id === 'prompt-textarea') value += 120;
         if (element.matches('textarea[name="prompt-textarea"]')) value += 80;
-        if (element.closest('form[data-type*="composer" i], form[class*="composer" i], [data-testid*="composer" i]')) value += 70;
-        if (element.closest('[data-message-author-role], article, dialog, [role="dialog"]')) value -= 140;
+        if (element.closest('form[data-type*="composer" i], form[class*="composer" i], [data-testid*="composer" i], [data-chatgpt-composer]')) value += 70;
+        if (element.closest(`${dom.message}, article, dialog, [role="dialog"]`)) value -= 140;
         value += Math.max(0, 70 - Math.max(0, viewportBottom - rect.bottom) / 4);
         return value;
       };
@@ -2081,11 +2251,17 @@
         });
       });
       form.querySelectorAll('button[aria-label]').forEach((button) => {
-        const label = String(button.getAttribute('aria-label') || '');
-        const match = label.match(/(?:移除文件\s*\d*[:：]?|remove\s+file\s*\d*[:：]?)[\s]*(.+)$/i);
-        if (match?.[1]) names.add(match[1].trim());
+        const name = this.getAttachmentRemovalName(button);
+        if (name) names.add(name);
       });
       return [...names];
+    }
+
+    getAttachmentRemovalName(button) {
+      const label = String(button.getAttribute('aria-label') || '');
+      const quoted = label.match(/^(?:移除|remove)\s*[“"](.+)[”"]\s*$/i);
+      const legacy = label.match(/(?:移除文件\s*\d*[:：]?|remove\s+file\s*\d*[:：]?)[\s]*(.+)$/i);
+      return (quoted?.[1] || legacy?.[1] || '').trim();
     }
 
     hasComposerAttachments(composer = this.findComposer()) {
@@ -2171,9 +2347,9 @@
       const composer = this.findComposer();
       const form = this.findComposerForm(composer);
       if (!form) return;
-      const buttons = Array.from(form.querySelectorAll(
-        'button[aria-label*="移除文件" i], button[aria-label*="remove file" i]'
-      ));
+      const buttons = Array.from(form.querySelectorAll('button[aria-label]')).filter((button) =>
+        this.getAttachmentRemovalName(button)
+        || /(?:移除文件|remove\s+file)/i.test(button.getAttribute('aria-label') || ''));
       for (const button of buttons) {
         try { button.click(); } catch {}
         await new Promise((resolve) => setTimeout(resolve, 50));
@@ -2540,21 +2716,20 @@
     }
 
     getConversationActivitySignature() {
-      const assistants = document.querySelectorAll('main [data-message-author-role="assistant"]');
+      const assistants = document.querySelectorAll(`main ${dom.assistant}`);
       const last = assistants[assistants.length - 1];
-      const text = String(last?.textContent || '');
+      const text = dom.messageText(last);
       return `${assistants.length}:${text.length}:${text.slice(Math.max(0, text.length - 400))}`;
     }
 
     getLatestUserTurnSignature() {
-      const users = document.querySelectorAll('main [data-message-author-role="user"]');
+      const users = document.querySelectorAll(`main ${dom.user}`);
       const last = users[users.length - 1];
       if (!last) return `0::`;
-      const messageId = last.getAttribute('data-message-id')
-        || last.closest('[data-message-id]')?.getAttribute('data-message-id')
+      const messageId = dom.messageId(last)
         || last.closest('[data-testid^="conversation-turn-"]')?.getAttribute('data-testid')
         || '';
-      const text = String(last.textContent || '')
+      const text = dom.messageText(last)
         .replace(/[\u200B\u200C\u200D\uFEFF]/g, '')
         .replace(/\s+/g, ' ')
         .trim();
@@ -2788,6 +2963,7 @@
       this.observedShell = null;
       this.neumorphicShell = null;
       this.positionRaf = 0;
+      this.mutationPositionTimer = 0;
       this.heartbeat = 0;
       this.started = false;
       this.onViewportChange = () => this.schedulePosition();
@@ -2817,7 +2993,7 @@
       document.addEventListener('pointerdown', this.onDocumentPointerDown, true);
       const observe = () => {
         if (this.observer || !document.documentElement) return;
-        this.observer = new MutationObserver(() => this.schedulePosition());
+        this.observer = new MutationObserver((records) => this.scheduleMutationPosition(records));
         this.observer.observe(document.documentElement, { childList: true, subtree: true });
       };
       observe();
@@ -3525,7 +3701,7 @@
 
       // ChatGPT 当前页面会给真正的输入区外壳标记 data-composer-surface。
       // 空输入框时没有 send button，优先认这个显式锚点，避免退到偏窄的编辑器内层。
-      const explicitSurface = composer.closest('[data-composer-surface="true"]');
+      const explicitSurface = composer.closest('[data-composer-surface="true"], [data-composer-surface-variant]');
       if (isReasonableShell(explicitSurface)) return explicitSurface;
 
       const candidates = [];
@@ -3544,8 +3720,8 @@
         if (rect.height > maxShellHeight || topDrift > maxTopDrift) continue;
 
         const radius = Number.parseFloat(getComputedStyle(node).borderRadius || '0') || 0;
-        const explicit = node.matches('[data-composer-surface="true"]');
-        const semantic = node.matches('form[data-type*="composer" i], form[class*="composer" i], [data-testid*="composer" i]');
+        const explicit = node.matches('[data-composer-surface="true"], [data-composer-surface-variant]');
+        const semantic = node.matches('form[data-type*="composer" i], form[class*="composer" i], [data-testid*="composer" i], [data-chatgpt-composer]');
         const genericForm = node.tagName === 'FORM';
         const containsSend = Boolean(sendButton && node.contains(sendButton));
         const widthGain = Math.max(0, rect.width - composerRect.width);
@@ -3565,6 +3741,23 @@
 
       candidates.sort((a, b) => b.score - a.score || a.depth - b.depth);
       return candidates[0]?.node || composer;
+    }
+
+    scheduleMutationPosition(records) {
+      const ownUi = '#cgpt-unified-queue-dock, #cgpt-unified-token-stats, [data-cgpt-token-chip]';
+      const externalChange = records.some((record) => {
+        const target = record.target?.nodeType === Node.ELEMENT_NODE
+          ? record.target : record.target?.parentElement;
+        if (target?.closest?.(ownUi)) return false;
+        const changed = [...record.addedNodes, ...record.removedNodes];
+        return !changed.length || !changed.every((node) => node instanceof Element && node.matches(ownUi));
+      });
+      if (!externalChange || this.mutationPositionTimer) return;
+      // Streamed answer DOM can change every frame. Scroll/resize still use rAF directly.
+      this.mutationPositionTimer = window.setTimeout(() => {
+        this.mutationPositionTimer = 0;
+        this.schedulePosition();
+      }, 120);
     }
 
     observeShell(shell) {
@@ -3664,8 +3857,17 @@
   runtime.composerQueueDock.start();
 
   function startMessageMarkdownCopy() {
-    const selector = 'main [data-message-author-role="assistant"]';
+    const selector = `main ${dom.assistant}`;
     const className = 'cgpt-unified-copy-message-md';
+    const pendingPlacement = new WeakSet();
+    const placeButtonAtEnd = (answer, button) => {
+      if (button === answer.lastElementChild || pendingPlacement.has(answer)) return;
+      pendingPlacement.add(answer);
+      queueMicrotask(() => {
+        pendingPlacement.delete(answer);
+        if (button.parentElement === answer && button !== answer.lastElementChild) answer.appendChild(button);
+      });
+    };
     const style = document.createElement('style');
     style.textContent = `
       .${className} { display: inline-grid; width: 32px; height: 32px; margin: 7px 0 3px;
@@ -3679,7 +3881,16 @@
         stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
     `;
     const addButton = (answer) => {
-      if (!(answer instanceof Element) || answer.querySelector(`.${className}`)) return;
+      if (!(answer instanceof Element)) return;
+      if (dom.isThinkingOverview(answer)) {
+        answer.querySelectorAll(`.${className}`).forEach((button) => button.remove());
+        return;
+      }
+      const existing = answer.querySelector(`:scope > .${className}`);
+      if (existing) {
+        placeButtonAtEnd(answer, existing);
+        return;
+      }
       const button = document.createElement('button');
       button.type = 'button';
       button.className = className;
@@ -3738,6 +3949,8 @@
 
 (() => {
   'use strict';
+
+  const dom = globalThis.__cgptUnifiedRuntimeV1.dom;
 
   const CONFIG = Object.freeze({
     // 单条回答本身非常长时再开启。默认关闭，兼容性更稳。
@@ -3832,29 +4045,19 @@
 
     // 面板四角缩放范围及尺寸持久化。缩放会自动转为手动定位。
     answerTocRememberSize: true,
-    answerTocMinWidthPx: 220,
+    answerTocMinWidthPx: 160,
     answerTocMaxWidthPx: 560,
     answerTocMinHeightPx: 170,
     answerTocMaxHeightPx: 760,
   });
 
-  const TURN_SELECTOR = 'main [data-testid^="conversation-turn-"]';
-  const ASSISTANT_SELECTOR = 'main [data-message-author-role="assistant"]';
-  const USER_SELECTOR = 'main [data-message-author-role="user"]';
+  const TURN_SELECTOR = `main ${dom.turn}`;
+  const ASSISTANT_SELECTOR = `main ${dom.assistant}`;
+  const USER_SELECTOR = `main ${dom.user}`;
 
-  const LONG_ANSWER_BLOCK_SELECTOR = [
-    `${ASSISTANT_SELECTOR} .markdown > p`,
-    `${ASSISTANT_SELECTOR} .markdown > pre`,
-    `${ASSISTANT_SELECTOR} .markdown > blockquote`,
-    `${ASSISTANT_SELECTOR} .markdown > ul`,
-    `${ASSISTANT_SELECTOR} .markdown > ol`,
-    `${ASSISTANT_SELECTOR} .markdown > table`,
-    `${ASSISTANT_SELECTOR} .markdown > h1`,
-    `${ASSISTANT_SELECTOR} .markdown > h2`,
-    `${ASSISTANT_SELECTOR} .markdown > h3`,
-    `${ASSISTANT_SELECTOR} .markdown > h4`,
-    `${ASSISTANT_SELECTOR} .markdown > div`,
-  ].join(',\n');
+  const LONG_ANSWER_BLOCK_SELECTOR = ['p', 'pre', 'blockquote', 'ul', 'ol', 'table', 'h1', 'h2', 'h3', 'h4', 'div']
+    .map((tag) => `${ASSISTANT_SELECTOR} ${dom.content} > ${tag}, main [data-markdown-text-style="assistant-message"] > ${tag}`)
+    .join(',\n');
 
   const css = [];
 
@@ -3864,7 +4067,7 @@
        * 屏幕外的历史轮次仍保留在 DOM 中，但浏览器可以跳过其子树的
        * 大量样式计算、布局和绘制工作。
        */
-      ${TURN_SELECTOR} {
+      ${TURN_SELECTOR}:not([data-turn-key]) {
         content-visibility: auto !important;
         contain-intrinsic-size: auto 640px !important;
         contain-intrinsic-size: auto none auto 640px !important;
@@ -4101,6 +4304,7 @@
       this.sizeMode = this.savedSize ? 'manual' : 'auto';
       this.collapsed = this.readCollapsedState();
       this.activeView = this.readViewState();
+      this.lastPanelWidthOverride = null;
 
       this.onScroll = this.onScroll.bind(this);
       this.onResize = this.onResize.bind(this);
@@ -4123,7 +4327,16 @@
       this.onResizePointerEnd = this.onResizePointerEnd.bind(this);
       this.onResizePointerCancel = this.onResizePointerCancel.bind(this);
       this.onUiSettingsChange = () => {
+        const nextWidthOverride = document.documentElement.style.getPropertyValue('--cgfc-toolbox-panel-width').trim();
+        const widthChanged = this.lastPanelWidthOverride !== null
+          && nextWidthOverride !== this.lastPanelWidthOverride;
+        this.lastPanelWidthOverride = nextWidthOverride;
         window.requestAnimationFrame(() => {
+          if (widthChanged && nextWidthOverride && this.sizeMode === 'manual' && this.savedSize) {
+            const anchor = !this.collapsed ? this.captureWidgetEdgeAnchor() : null;
+            this.setPanelSize(Number.parseFloat(nextWidthOverride), this.savedSize.height, true);
+            if (anchor) this.alignManualWidgetToEdgeAnchor(anchor, true);
+          }
           this.ensurePanelSizeInViewport(false);
           this.ensureManualPositionInViewport(true);
           this.updateInlineEndOffset();
@@ -4326,6 +4539,7 @@
 
           .panel {
             position: relative;
+            container-type: inline-size;
             width: min(var(--cgpt-answer-toc-width, var(--cgfc-toolbox-panel-width, 300px)), calc(100vw - 16px));
             max-height: min(68dvh, 660px, calc(100dvh - 16px));
             display: flex;
@@ -4497,6 +4711,13 @@
             font-size: 10px;
             font-variant-numeric: tabular-nums;
             font-weight: 500;
+          }
+
+          @container (max-width: 219px) {
+            .panel-header { gap: 4px; padding-inline-end: 7px; }
+            .panel-title-wrap { gap: 0; }
+            .count-label, .view-count { display: none; }
+            .view-tab { gap: 1px; padding-inline: 2px; }
           }
 
           .toc-nav {
@@ -4988,7 +5209,7 @@
       const margin = Math.max(0, Number(this.config.answerTocDragViewportMarginPx) || 0);
       const viewportWidth = Math.max(1, document.documentElement.clientWidth);
       const viewportHeight = Math.max(1, document.documentElement.clientHeight);
-      const configuredMinWidth = Math.max(160, Number(this.config.answerTocMinWidthPx) || 220);
+      const configuredMinWidth = Math.max(160, Number(this.config.answerTocMinWidthPx) || 160);
       const configuredMaxWidth = Math.max(
         configuredMinWidth,
         Number(this.config.answerTocMaxWidthPx) || 560,
@@ -6079,9 +6300,9 @@
 
     bindMainObserver() {
       const conversationAnchor =
-        document.querySelector('[data-message-author-role="assistant"]') ||
-        document.querySelector('[data-message-author-role="user"]') ||
-        document.querySelector('[data-composer-surface="true"], #prompt-textarea');
+        document.querySelector(dom.assistant) ||
+        document.querySelector(dom.user) ||
+        document.querySelector('[data-composer-surface="true"], [data-chatgpt-composer], #prompt-textarea');
       const main = conversationAnchor?.closest('main') || document.querySelector('main');
       if (!main) {
         window.clearTimeout(this.rebindTimer);
@@ -6121,11 +6342,11 @@
         }
 
         for (const node of [...record.addedNodes, ...record.removedNodes]) {
-          if (this.nodeMatchesOrContains(node, '[data-message-author-role="assistant"]')) {
+          if (this.nodeMatchesOrContains(node, dom.assistant)) {
             assistantAdded = true;
           }
           if (
-            this.nodeMatchesOrContains(node, '[data-message-author-role="user"]') ||
+            this.nodeMatchesOrContains(node, dom.user) ||
             this.nodeMatchesOrContains(node, 'button[data-toc-item-index]')
           ) {
             conversationChanged = true;
@@ -6209,7 +6430,7 @@
       for (const xRatio of [0.5, 0.42, 0.58]) {
         const x = Math.min(width - 1, Math.max(0, width * xRatio));
         const element = document.elementFromPoint(x, activeY);
-        const answer = element?.closest?.('[data-message-author-role="assistant"]');
+        const answer = element?.closest?.(dom.assistant);
         if (answer) return answer;
       }
 
@@ -6228,7 +6449,7 @@
         for (const yRatio of yRatios) {
           const y = Math.min(height - 1, Math.max(0, height * yRatio));
           const element = document.elementFromPoint(x, y);
-          const answer = element?.closest?.('[data-message-author-role="assistant"]');
+          const answer = element?.closest?.(dom.assistant);
           if (!answer) continue;
 
           const verticalWeight =
@@ -6366,8 +6587,8 @@
 
       const headings = [];
       const hasMarkdownRoot =
-        this.currentAnswer.matches('.markdown') ||
-        Boolean(this.currentAnswer.querySelector('.markdown'));
+        this.currentAnswer.matches(dom.content) ||
+        Boolean(this.currentAnswer.querySelector(dom.content));
       const nodes = this.currentContentRoot.querySelectorAll(
         this.config.answerTocHeadingSelector,
       );
@@ -6375,8 +6596,8 @@
       for (const element of nodes) {
         if (!(element instanceof HTMLElement)) continue;
         if (element.closest('[hidden], [aria-hidden="true"]')) continue;
-        if (hasMarkdownRoot && !element.closest('.markdown')) continue;
-        if (element.closest('[data-message-author-role="assistant"]') !== this.currentAnswer) {
+        if (hasMarkdownRoot && !element.closest(dom.content)) continue;
+        if (element.closest(dom.assistant) !== this.currentAnswer) {
           continue;
         }
 
@@ -6483,12 +6704,12 @@
     collectDerivedOutline() {
       const answer = this.currentAnswer;
       if (!(answer instanceof HTMLElement)) return [];
-      const markdownRoot = answer.matches('.markdown') ? answer : answer.querySelector('.markdown');
+      const markdownRoot = answer.matches(dom.content) ? answer : answer.querySelector(dom.content);
       const root = markdownRoot || answer;
       const minLength = Math.max(3, Number(this.config.answerTocDerivedMinTextLength) || 8);
       const maxItems = Math.max(3, Number(this.config.answerTocDerivedMaxItems) || 18);
       const belongsToAnswer = (element) =>
-        element.closest('[data-message-author-role="assistant"]') === answer
+        element.closest(dom.assistant) === answer
         && !element.closest('[hidden], [aria-hidden="true"]');
       const makeItem = (element, level, prefix = '') => {
         const raw = this.normalizeText(element.textContent ?? '');
@@ -6549,7 +6770,7 @@
     collectAdaptiveOutline(existing = []) {
       const answer = this.currentAnswer;
       if (!(answer instanceof HTMLElement)) return [];
-      const markdownRoot = answer.matches('.markdown') ? answer : answer.querySelector('.markdown');
+      const markdownRoot = answer.matches(dom.content) ? answer : answer.querySelector(dom.content);
       const root = markdownRoot || answer;
       const minLength = Math.max(3, Number(this.config.answerTocDerivedMinTextLength) || 8);
       const maxItems = Math.max(3, Number(this.config.answerTocDerivedMaxItems) || 18);
@@ -6568,7 +6789,7 @@
       const canonicalLabel = (value) => this.canonicalOutlineLabel(value);
       const existingLabels = new Set(existing.map((item) => canonicalLabel(item.fullLabel)));
       const belongsToAnswer = (element) =>
-        element.closest('[data-message-author-role="assistant"]') === answer
+        element.closest(dom.assistant) === answer
         && !element.closest('[hidden], [aria-hidden="true"]');
       const compareElements = (a, b) => {
         if (a === b) return 0;
@@ -6789,7 +7010,7 @@
 
     getConversationTurnElement(element) {
       return element instanceof Element
-        ? element.closest('[data-testid^="conversation-turn-"]')
+        ? element.closest(dom.turn)
         : null;
     }
 
@@ -6806,8 +7027,7 @@
     getConversationRecordIdentity(element, fallbackIndex = 0) {
       const turn = this.getConversationTurnElement(element);
       const messageId =
-        element?.getAttribute?.('data-message-id') ||
-        element?.closest?.('[data-message-id]')?.getAttribute('data-message-id') ||
+        dom.messageId(element) ||
         turn?.querySelector?.('[data-message-id]')?.getAttribute('data-message-id') ||
         '';
       if (messageId) return `message:${messageId}`;
@@ -6820,13 +7040,13 @@
       const bridgedTurns = globalThis.__cgptUnifiedRuntimeV1?.lazy?.getAllTurnNodes?.() || [];
       const candidateSource = bridgedTurns.length
         ? bridgedTurns.flatMap((turn) => [
-            ...(turn.matches?.('[data-message-author-role="user"]') ? [turn] : []),
-            ...turn.querySelectorAll?.('[data-message-author-role="user"]') || [],
+            ...(turn.matches?.(dom.user) ? [turn] : []),
+            ...turn.querySelectorAll?.(dom.user) || [],
           ])
         : [...document.querySelectorAll(USER_SELECTOR)];
       const candidates = candidateSource.filter((element) => {
         if (!(element instanceof HTMLElement) || (!element.isConnected && !bridgedTurns.length)) return false;
-        if (element.parentElement?.closest('[data-message-author-role="user"]')) return false;
+        if (element.parentElement?.closest(dom.user)) return false;
         if (element.closest('[hidden]')) return false;
         return true;
       });
@@ -6871,7 +7091,7 @@
       const source =
         element.querySelector('[data-message-content]') ||
         element.querySelector('.whitespace-pre-wrap') ||
-        element.querySelector('.markdown') ||
+        element.querySelector(dom.content) ||
         element;
 
       const clone = source.cloneNode(true);
@@ -7091,9 +7311,10 @@
     getConversationSignature() {
       const users = this.getUserMessageElements();
       const buttons = this.getOfficialNavButtons();
-      const currentAnswerIdentity = this.currentAnswer?.closest?.(
-        '[data-testid^="conversation-turn-"]',
-      )?.getAttribute('data-testid') || '';
+      const currentAnswerTurn = this.currentAnswer?.closest?.(dom.turn);
+      const currentAnswerIdentity = dom.messageId(this.currentAnswer)
+        || currentAnswerTurn?.getAttribute('data-testid')
+        || currentAnswerTurn?.getAttribute('data-turn-key') || '';
       const userSignature = users.map((element, index) => {
         const text = (element.textContent ?? '').trim();
         const identity = this.getConversationRecordIdentity(element, index);
@@ -8032,12 +8253,12 @@
           : null;
       try {
         if (target instanceof HTMLElement) {
-          target.scrollTo({ top: 0, behavior: 'auto' });
+          target.scrollTo({ top: dom.scrollBounds(target).min, behavior: 'auto' });
         } else {
           window.scrollTo({ top: 0, behavior: 'auto' });
         }
       } catch (_) {
-        if (target instanceof HTMLElement) target.scrollTop = 0;
+        if (target instanceof HTMLElement) target.scrollTop = dom.scrollBounds(target).min;
         else document.scrollingElement?.scrollTo?.(0, 0);
       }
       this.scheduleConversationRebuild(80);
@@ -8278,7 +8499,7 @@
 
       if (this.currentScrollRoot instanceof HTMLElement) {
         this.currentScrollRoot.scrollTo({
-          top: Math.max(0, this.currentScrollRoot.scrollTop + delta),
+          top: dom.clampScrollTop(this.currentScrollRoot, this.currentScrollRoot.scrollTop + delta),
           behavior,
         });
       } else {
@@ -9981,6 +10202,9 @@
 (function () {
   'use strict';
 
+  const dom = globalThis.__cgptUnifiedRuntimeV1.dom;
+  const chatContentSelector = `main :is(${dom.message}, ${dom.content})`;
+  const proseTextSelector = `${chatContentSelector} :where(p, li, ul, ol, td, th, blockquote, details, summary, dt, dd):not(:where(.katex *, .MathJax *, mjx-container *, math *, pre *, code *, button *))`;
   const STYLE_ID = 'cgfc-ophel-optimized-style';
   const TOGGLE_ID = 'cgfc-toggle';
   const PANEL_ID = 'cgfc-panel';
@@ -10014,6 +10238,7 @@
     mathFontMode: 'native',
     codeFont: '"JetBrains Mono"',
     fontSize: 26,
+    thinkingOverviewFontSize: 18,
     lineHeight: 1.9,
     codeFontSize: 18,
     codeLineHeight: 1.8,
@@ -10035,6 +10260,8 @@
     toolboxFontSize: 13,
     toolboxLineHeight: 1.4,
     toolboxPanelWidth: 300,
+    bodyColumnLeftOffset: 0,
+    bodyColumnRightOffset: 0,
     toolboxUseCustomColors: false,
     toolboxTextColor: '#f4f4f4',
     toolboxBackgroundColor: '#212121',
@@ -10071,10 +10298,11 @@
   const OVERRIDEABLE_SETTING_KEYS = new Set([
     'latinFont', 'chineseFont', 'boldLatinFont', 'boldChineseFont',
     'mathFont', 'mathFontMode', 'codeFont',
-    'fontSize', 'lineHeight', 'codeFontSize', 'codeLineHeight',
+    'fontSize', 'thinkingOverviewFontSize', 'lineHeight', 'codeFontSize', 'codeLineHeight',
     'normalColor', 'boldColor', 'boldWeight',
     'fontSmoothingMode', 'textRenderingMode', 'formulaCopyBorderColor', 'messageCopyIconColor',
     'toolboxFont', 'toolboxFontSize', 'toolboxLineHeight', 'toolboxPanelWidth',
+    'bodyColumnLeftOffset', 'bodyColumnRightOffset',
     'toolboxTextColor', 'toolboxBackgroundColor', 'toolboxAccentColor', 'toolboxOpacity',
     'queueFont', 'queueFontSize', 'queueLineHeight', 'queuePanelWidth',
     'queueTextColor', 'queueBackgroundColor', 'queueAccentColor', 'queueOpacity',
@@ -10100,6 +10328,7 @@
     mathFontMode: 'select',
     codeFont: 'text',
     fontSize: 'number',
+    thinkingOverviewFontSize: 'number',
     lineHeight: 'number',
     codeFontSize: 'number',
     codeLineHeight: 'number',
@@ -10121,6 +10350,8 @@
     toolboxFontSize: 'number',
     toolboxLineHeight: 'number',
     toolboxPanelWidth: 'number',
+    bodyColumnLeftOffset: 'number',
+    bodyColumnRightOffset: 'number',
     toolboxUseCustomColors: 'boolean',
     toolboxTextColor: 'color',
     toolboxBackgroundColor: 'color',
@@ -10155,13 +10386,16 @@
 
   const numberLimits = {
     fontSize: [10, 40],
+    thinkingOverviewFontSize: [10, 40],
     lineHeight: [1, 2.8],
     codeFontSize: [10, 32],
     codeLineHeight: [1, 2.8],
     boldWeight: [400, 1000],
     toolboxFontSize: [9, 24],
     toolboxLineHeight: [1, 2.2],
-    toolboxPanelWidth: [220, 560],
+    toolboxPanelWidth: [160, 560],
+    bodyColumnLeftOffset: [-400, 400],
+    bodyColumnRightOffset: [-400, 400],
     toolboxOpacity: [0.2, 1],
     queueFontSize: [9, 24],
     queueLineHeight: [1, 2.2],
@@ -10585,7 +10819,7 @@
     const bodyFontEnabled = latinEnabled || chineseEnabled;
     if (bodyFontEnabled) {
       const nativeBodyFont = (!latinEnabled || !chineseEnabled)
-        ? nativeFamily('main [data-message-author-role] .markdown, main [data-message-author-role] .prose, main [data-message-author-role]', 'data-cgfc-body-font')
+        ? nativeFamily(chatContentSelector, 'data-cgfc-body-font')
         : 'system-ui';
       root.style.setProperty('--cgfc-latin-font', latinEnabled
         ? stripGenericFontFallbacks(settings.latinFont, defaults.latinFont)
@@ -10604,7 +10838,7 @@
     const boldFontEnabled = boldLatinEnabled || boldChineseEnabled;
     if (boldFontEnabled) {
       const nativeBoldFont = (!boldLatinEnabled || !boldChineseEnabled)
-        ? nativeFamily('main [data-message-author-role] strong, main [data-message-author-role] b', 'data-cgfc-bold-font')
+        ? nativeFamily(`${chatContentSelector} :is(strong, b)`, 'data-cgfc-bold-font')
         : 'system-ui';
       root.style.setProperty('--cgfc-bold-latin-font', boldLatinEnabled
         ? stripGenericFontFallbacks(settings.boldLatinFont, defaults.boldLatinFont)
@@ -10625,8 +10859,14 @@
 
     setOrRemove('--cgfc-font-size', enabled('fontSize'), `${normalizeSetting('fontSize', settings.fontSize)}px`);
     toggleOverrideAttr('data-cgfc-font-size', enabled('fontSize'));
+    setOrRemove('--cgfc-thinking-overview-font-size', enabled('thinkingOverviewFontSize'), `${normalizeSetting('thinkingOverviewFontSize', settings.thinkingOverviewFontSize)}px`);
+    toggleOverrideAttr('data-cgfc-thinking-overview-font-size', enabled('thinkingOverviewFontSize'));
     setOrRemove('--cgfc-line-height', enabled('lineHeight'), String(normalizeSetting('lineHeight', settings.lineHeight)));
     toggleOverrideAttr('data-cgfc-line-height', enabled('lineHeight'));
+    const adjustBodyColumn = enabled('bodyColumnLeftOffset') || enabled('bodyColumnRightOffset');
+    setOrRemove('--cgfc-body-column-left-offset', enabled('bodyColumnLeftOffset'), `${normalizeSetting('bodyColumnLeftOffset', settings.bodyColumnLeftOffset)}px`);
+    setOrRemove('--cgfc-body-column-right-offset', enabled('bodyColumnRightOffset'), `${normalizeSetting('bodyColumnRightOffset', settings.bodyColumnRightOffset)}px`);
+    toggleOverrideAttr('data-cgfc-body-column-adjust', adjustBodyColumn);
     setOrRemove('--cgfc-code-font-size', enabled('codeFontSize'), `${normalizeSetting('codeFontSize', settings.codeFontSize)}px`);
     toggleOverrideAttr('data-cgfc-code-font-size', enabled('codeFontSize'));
     setOrRemove('--cgfc-code-line-height', enabled('codeLineHeight'), String(normalizeSetting('codeLineHeight', settings.codeLineHeight)));
@@ -10955,7 +11195,7 @@
       );
       if (directStop && isVisible(directStop)) return true;
 
-      const composer = document.querySelector('form, [data-testid*="composer"], [class*="composer"]');
+      const composer = document.querySelector('[data-chatgpt-composer], form, [data-testid*="composer"], [class*="composer"]');
       if (!composer) return false;
       const buttons = composer.querySelectorAll('button, [role="button"]');
       for (const button of buttons) {
@@ -10967,7 +11207,8 @@
           button.textContent || '',
         ].join(' ');
 
-        if (/\b(?:stop (?:generating|streaming|response)|generating)\b|停止(?:生成|回答)|中止生成|生成中/i.test(label)) {
+        if (/\b(?:stop (?:generating|streaming|response)|generating)\b|停止(?:生成|回答)|中止生成|生成中/i.test(label)
+          || /^(?:停止|stop)$/i.test((button.getAttribute('aria-label') || '').trim())) {
           return true;
         }
       }
@@ -11949,6 +12190,16 @@
     appendControl(row, { label: '正文字号 px', key: 'fontSize', type: 'number', min: 10, max: 40, step: 1 });
     appendControl(row, { label: '正文行高', key: 'lineHeight', type: 'number', min: 1, max: 2.8, step: 0.05 });
 
+    appendControl(panel, { label: '模型的思考概览字号 px', key: 'thinkingOverviewFontSize', type: 'number', min: 10, max: 40, step: 1 });
+
+    row = createRow(panel);
+    appendControl(row, { label: '正文左边界偏移 px', key: 'bodyColumnLeftOffset', type: 'number', min: -400, max: 400, step: 10 });
+    appendControl(row, { label: '正文右边界偏移 px', key: 'bodyColumnRightOffset', type: 'number', min: -400, max: 400, step: 10 });
+    const bodyColumnHint = document.createElement('p');
+    bodyColumnHint.className = 'cgfc-hint';
+    bodyColumnHint.textContent = '以网站当前正文列为基准：正数向内收窄，负数向外扩展；左右可分别设置。超出可用空间时会保留至少 160px 宽度。';
+    panel.appendChild(bodyColumnHint);
+
     row = createRow(panel);
     appendControl(row, { label: '代码字号 px', key: 'codeFontSize', type: 'number', min: 10, max: 32, step: 1 });
     appendControl(row, { label: '代码行高', key: 'codeLineHeight', type: 'number', min: 1, max: 2.8, step: 0.05 });
@@ -11987,7 +12238,7 @@
     row = createRow(toolboxGroup);
     appendControl(row, { label: '字号 px', key: 'toolboxFontSize', type: 'number', min: 9, max: 24, step: 1 });
     appendControl(row, { label: '行高', key: 'toolboxLineHeight', type: 'number', min: 1, max: 2.2, step: 0.05 });
-    appendControl(toolboxGroup, { label: '面板宽度 px', key: 'toolboxPanelWidth', type: 'number', min: 220, max: 560, step: 10 });
+    appendControl(toolboxGroup, { label: '面板宽度 px', key: 'toolboxPanelWidth', type: 'number', min: 160, max: 560, step: 10 });
     row = createRow(toolboxGroup);
     appendControl(row, { label: '文字颜色', key: 'toolboxTextColor', type: 'color' });
     appendControl(row, { label: '背景颜色', key: 'toolboxBackgroundColor', type: 'color' });
@@ -11996,7 +12247,7 @@
     appendControl(row, { label: '背景透明度', key: 'toolboxOpacity', type: 'number', min: 0.2, max: 1, step: 0.05 });
     const toolboxHint = document.createElement('p');
     toolboxHint.className = 'cgfc-hint';
-    toolboxHint.textContent = '每个外观项均可独立启停；颜色项关闭后继续跟随 ChatGPT 明暗主题。面板宽度不会覆盖你手动拖拽保存的浮窗尺寸。';
+    toolboxHint.textContent = '每个外观项均可独立启停；颜色项关闭后继续跟随 ChatGPT 明暗主题。贴片可缩到 160px；修改宽度设置时会更新当前手动尺寸。';
     toolboxGroup.appendChild(toolboxHint);
 
     const queueGroup = createSettingsGroup(panel, '输入框旁发送队列外观');
@@ -12258,8 +12509,17 @@
     if (/^[+-]?\d+(?:[.,]\d+)?$/.test(trimmed)) return true;
     if (/^[+-]?\d+(?:[.,]\d+)?\s*[-–—]?$/.test(trimmed)) return true;
     if (/^[+-]?\d+(?:[.,]\d+)?\s*[-–—]\s*[+-]?\d+(?:[.,]\d+)?$/.test(trimmed)) return true;
-    if (/^[+-]?\d/.test(trimmed) && !/[\\^_{}]/.test(trimmed)) return true;
+    if (/^[+-]?\d/.test(trimmed) && !/[\\^_{}<>=+*/()]/.test(trimmed)) return true;
     return false;
+  }
+
+  function isPlausibleResidualLatex(value) {
+    const content = String(value || '').trim();
+    if (!content) return false;
+    // KaTeX accepts bare CJK prose as text, so successful rendering alone is
+    // not evidence of math. Explicit \text{中文} remains valid.
+    const withoutTextMacros = content.replace(/\\(?:text|mbox|textbf|textit)\{[^{}]*\}/g, '');
+    return !/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}，。！？；：“”‘’]/u.test(withoutTextMacros);
   }
 
   function tokenizeResidualLatex(input) {
@@ -12312,7 +12572,8 @@
       }
 
       const content = text.slice(cursor + open.length, end);
-      if (!content.trim() || (!display && open === '$' && (content.includes('\n') || isCurrencyLikeInlineLatex(content)))) {
+      if (!isPlausibleResidualLatex(content)
+        || (!display && open === '$' && (content.includes('\n') || isCurrencyLikeInlineLatex(content)))) {
         cursor += open.length;
         continue;
       }
@@ -12370,36 +12631,36 @@
   function residualExcludedElement(element) {
     if (!(element instanceof Element)) return true;
     return Boolean(element.closest([
-      'pre', 'code', 'textarea', 'input', 'select', 'option', 'script', 'style', 'noscript',
+      'pre', 'code', '[data-markdown-copy="inline-code"]', 'textarea', 'input', 'select', 'option', 'script', 'style', 'noscript',
       '[contenteditable="true"]', '.katex', '.MathJax', 'mjx-container', 'math', 'annotation',
-      '[data-latex]', `.${RESIDUAL_WRAPPER_CLASS}`, `#${PANEL_ID}`, `#${TOGGLE_ID}`, '[aria-hidden="true"]',
+      '[data-latex]', '[data-math-source]', `.${RESIDUAL_WRAPPER_CLASS}`, `#${PANEL_ID}`, `#${TOGGLE_ID}`, '[aria-hidden="true"]',
     ].join(',')));
   }
 
   function assistantRoleFor(element) {
     if (!(element instanceof Element)) return null;
-    return element.closest('[data-message-author-role="assistant"], [role="assistant"]');
+    return element.closest(`${dom.assistant}, [role="assistant"]`);
   }
 
   function assistantContentRoot(element) {
     const role = assistantRoleFor(element);
     if (!role || residualExcludedElement(role)) return null;
-    const content = element.closest('.markdown, .prose');
+    const content = element.closest(dom.content);
     if (content && assistantRoleFor(content) === role && !residualExcludedElement(content)) return content;
-    return role.querySelector?.('.markdown, .prose') || role;
+    return role.querySelector?.(dom.content) || role;
   }
 
   function collectAssistantRoots(scanRoot) {
     const roots = new Set();
     const root = scanRoot instanceof Element ? scanRoot : document.body || document.documentElement;
     if (!root) return roots;
-    if (root.matches?.('[data-message-author-role="assistant"], [role="assistant"], .markdown, .prose')) {
+    if (root.matches?.(`${dom.assistant}, [role="assistant"], ${dom.content}`)) {
       const own = assistantContentRoot(root);
       if (own) roots.add(own);
     }
-    root.querySelectorAll?.('[data-message-author-role="assistant"], [role="assistant"]').forEach((role) => {
+    root.querySelectorAll?.(`${dom.assistant}, [role="assistant"]`).forEach((role) => {
       if (residualExcludedElement(role)) return;
-      const content = role.querySelector('.markdown, .prose');
+      const content = role.querySelector(dom.content);
       roots.add(content || role);
     });
     return roots;
@@ -12428,6 +12689,108 @@
     }
   }
 
+  function rememberResidualMutation(parent, count = 1) {
+    residualSelfMutationCounts.set(parent, (residualSelfMutationCounts.get(parent) || 0) + count);
+  }
+
+  function restoreInvalidResidualMath(root) {
+    root.querySelectorAll(`.${RESIDUAL_WRAPPER_CLASS}[data-cgfc-latex]`).forEach((holder) => {
+      if (isPlausibleResidualLatex(holder.dataset.cgfcLatex)) return;
+      const parent = holder.parentElement;
+      if (!parent) return;
+      const raw = holder.getAttribute('aria-label') || `$${holder.dataset.cgfcLatex || ''}$`;
+      rememberResidualMutation(parent);
+      parent.replaceChild(document.createTextNode(raw), holder);
+    });
+  }
+
+  function repairFragmentedInlineMath(root) {
+    // The current Markdown renderer can split "$X_i$" into an LTR span holding
+    // "$X_i" and a following text node beginning with the closing "$".
+    // Pair those adjacent pieces before scanning the remaining text nodes.
+    root.querySelectorAll('span[dir="ltr"]:not([data-markdown-copy])').forEach((span) => {
+      const raw = span.textContent?.trim() || '';
+      const next = span.nextSibling;
+      if (!(next?.nodeType === Node.TEXT_NODE && next.nodeValue?.startsWith('$'))
+        || !raw.startsWith('$') || raw.includes('$', 1)) return;
+      const content = raw.slice(1);
+      if (!isPlausibleResidualLatex(content) || isCurrencyLikeInlineLatex(content)) return;
+      const holder = renderResidualMath({ content, raw: `$${content}$`, display: false });
+      const parent = span.parentElement;
+      if (!holder || !parent) return;
+      rememberResidualMutation(parent, 2);
+      parent.replaceChild(holder, span);
+      next.nodeValue = next.nodeValue.slice(1);
+    });
+  }
+
+  function repairInlineMathAcrossNodes(root) {
+    // ChatGPT can put the opening "$x" in an isolate, the rest in a text node,
+    // or split a formula between spans around punctuation. Pair delimiters
+    // within one text block without crossing code, links, or rendered math.
+    const inlineTags = new Set(['SPAN', 'EM', 'STRONG', 'B', 'I', 'U', 'S', 'SUP', 'SUB', 'SMALL', 'MARK', 'DEL', 'INS']);
+    const blockSelector = 'p, li, h1, h2, h3, h4, h5, h6, td, th, figcaption';
+    const blocks = root.matches?.(blockSelector) ? [root] : root.querySelectorAll(blockSelector);
+    const boundary = (nodes, offset, end) => {
+      let passed = 0;
+      for (const node of nodes) {
+        const length = node.nodeValue?.length || 0;
+        if (end ? offset > passed && offset <= passed + length : offset >= passed && offset < passed + length) {
+          return { node, offset: offset - passed };
+        }
+        passed += length;
+      }
+      return null;
+    };
+
+    for (const block of blocks) {
+      if (!block.textContent?.includes('$') || residualExcludedElement(block)) continue;
+      for (let attempt = 0; attempt < 12; attempt += 1) {
+        const runs = [];
+        let run = [];
+        const flush = () => {
+          if (run.length) runs.push(run);
+          run = [];
+        };
+        const visit = (node) => {
+          if (node.nodeType === Node.TEXT_NODE) {
+            if (node.nodeValue) run.push(node);
+          } else if (node instanceof Element && inlineTags.has(node.tagName) && !residualExcludedElement(node)) {
+            node.childNodes.forEach(visit);
+          } else flush();
+        };
+        block.childNodes.forEach(visit);
+        flush();
+
+        let repaired = false;
+        for (const nodes of runs) {
+          const text = nodes.map((node) => node.nodeValue).join('');
+          if (!text.includes('$')) continue;
+          let offset = 0;
+          for (const token of tokenizeResidualLatex(text)) {
+            const start = offset;
+            offset += token.raw.length;
+            if (token.type !== 'math' || token.display || !token.raw.startsWith('$') || token.raw.startsWith('$$')) continue;
+            const from = boundary(nodes, start, false);
+            const to = boundary(nodes, offset, true);
+            if (!from || !to || from.node === to.node) continue;
+            const holder = renderResidualMath(token);
+            if (!holder) continue;
+            const range = document.createRange();
+            range.setStart(from.node, from.offset);
+            range.setEnd(to.node, to.offset);
+            range.deleteContents();
+            range.insertNode(holder);
+            repaired = true;
+            break;
+          }
+          if (repaired) break;
+        }
+        if (!repaired) break;
+      }
+    }
+  }
+
   function nextResidualBatch(state, batchSize) {
     const start = state.index;
     const end = Math.min(state.nodes.length, start + batchSize);
@@ -12440,6 +12803,9 @@
     root.setAttribute(RESIDUAL_ROOT_MARKER, 'true');
     let state = residualRootWork.get(root);
     if (!state) {
+      restoreInvalidResidualMath(root);
+      repairFragmentedInlineMath(root);
+      repairInlineMathAcrossNodes(root);
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
         acceptNode(node) {
           return residualExcludedElement(node.parentElement) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
@@ -12470,7 +12836,7 @@
       if (rendered) {
         const parent = textNode.parentNode;
         if (parent instanceof Element) {
-          residualSelfMutationCounts.set(parent, (residualSelfMutationCounts.get(parent) || 0) + 1);
+          rememberResidualMutation(parent);
           parent.replaceChild(fragment, textNode);
         }
       }
@@ -12596,7 +12962,7 @@
       if (latex) {
         return {
           latex,
-          isBlock: dataHost.classList.contains('math-block') || Boolean(dataHost.querySelector('.katex-display')),
+          isBlock: dataHost.matches('.math-block, [data-math-display="true"]') || Boolean(dataHost.querySelector('.katex-display')),
         };
       }
     }
@@ -12885,19 +13251,39 @@
         0 2px 7px color-mix(in srgb, var(--cgfc-queue-accent-color, #6d5dfc) 15%, transparent);
     }
 
+    /* Shift the reading column's two edges independently. The native wrapper
+       supplies the responsive width; container units keep expansion within the
+       transcript viewport, and the minimum width prevents a collapsed column. */
+    html[data-cgfc-body-column-adjust] main [data-thread-user-message-navigation-content] {
+      --cgfc-column-base-width: min(100cqw, var(--thread-body-max-width, 800px));
+      --cgfc-column-side-space: max(0px, calc((100cqw - var(--cgfc-column-base-width)) / 2));
+      --cgfc-column-left: max(calc(-1 * var(--cgfc-column-side-space)), var(--cgfc-body-column-left-offset, 0px));
+      --cgfc-column-right: max(calc(-1 * var(--cgfc-column-side-space)), var(--cgfc-body-column-right-offset, 0px));
+      --cgfc-column-target-width: min(100cqw, max(160px, calc(var(--cgfc-column-base-width) - var(--cgfc-column-left) - var(--cgfc-column-right))));
+      width: var(--cgfc-column-target-width) !important;
+      max-width: var(--cgfc-column-target-width) !important;
+      left: clamp(
+        calc((var(--cgfc-column-target-width) - 100cqw) / 2),
+        calc((var(--cgfc-column-left) - var(--cgfc-column-right)) / 2),
+        calc((100cqw - var(--cgfc-column-target-width)) / 2)
+      ) !important;
+    }
+
     html[data-cgfc-body-font] body,
-    html[data-cgfc-body-font] main [data-message-author-role],
-    html[data-cgfc-body-font] main .markdown,
-    html[data-cgfc-body-font] main .prose,
+    html[data-cgfc-body-font] ${chatContentSelector},
     html[data-cgfc-body-font] textarea,
     html[data-cgfc-body-font] [contenteditable="true"] {
       font-family: var(--cgfc-latin-font), var(--cgfc-chinese-font), serif !important;
     }
 
+    /* The new renderer gives paragraphs/headings their own --font-content.
+       Scope its variables to messages; keep KaTeX/MathJax/code font metrics intact. */
+    html[data-cgfc-body-font] ${chatContentSelector} {
+      --font-content: var(--cgfc-latin-font), var(--cgfc-chinese-font), serif !important;
+    }
+
     html[data-cgfc-font-smoothing-mode] body,
-    html[data-cgfc-font-smoothing-mode] main [data-message-author-role],
-    html[data-cgfc-font-smoothing-mode] main .markdown,
-    html[data-cgfc-font-smoothing-mode] main .prose,
+    html[data-cgfc-font-smoothing-mode] ${chatContentSelector},
     html[data-cgfc-font-smoothing-mode] textarea,
     html[data-cgfc-font-smoothing-mode] [contenteditable="true"] {
       -webkit-font-smoothing: var(--cgfc-font-smoothing) !important;
@@ -12905,9 +13291,7 @@
     }
 
     html[data-cgfc-text-rendering-mode] body,
-    html[data-cgfc-text-rendering-mode] main [data-message-author-role],
-    html[data-cgfc-text-rendering-mode] main .markdown,
-    html[data-cgfc-text-rendering-mode] main .prose,
+    html[data-cgfc-text-rendering-mode] ${chatContentSelector},
     html[data-cgfc-text-rendering-mode] textarea,
     html[data-cgfc-text-rendering-mode] [contenteditable="true"] {
       text-rendering: var(--cgfc-text-rendering) !important;
@@ -12926,79 +13310,66 @@
       box-shadow: none;
     }
 
-    html[data-cgfc-normal-color] main [data-message-author-role],
-    html[data-cgfc-normal-color] main .markdown,
-    html[data-cgfc-normal-color] main .prose {
+    html[data-cgfc-normal-color] ${chatContentSelector} {
       color: var(--cgfc-normal-color) !important;
     }
 
-    html[data-cgfc-font-size] main [data-message-author-role],
-    html[data-cgfc-font-size] main .markdown,
-    html[data-cgfc-font-size] main .prose {
+    html[data-cgfc-font-size] ${chatContentSelector} {
+      --markdown-font-size: var(--cgfc-font-size) !important;
+      --codex-chat-font-size: var(--cgfc-font-size) !important;
       font-size: var(--cgfc-font-size) !important;
     }
 
-    html[data-cgfc-line-height] main [data-message-author-role],
-    html[data-cgfc-line-height] main .markdown,
-    html[data-cgfc-line-height] main .prose {
+    html[data-cgfc-thinking-overview-font-size] main [data-chatgpt-agent-turn-start] + * [data-markdown-text-style="assistant-message"],
+    html[data-cgfc-thinking-overview-font-size] main [data-markdown-text-style="assistant-message"][data-markdown-text-tone="tertiary"] {
+      --markdown-font-size: var(--cgfc-thinking-overview-font-size) !important;
+      --codex-chat-font-size: var(--cgfc-thinking-overview-font-size) !important;
+      font-size: var(--cgfc-thinking-overview-font-size) !important;
+    }
+
+    html[data-cgfc-line-height] ${chatContentSelector} {
+      --markdown-line-height: var(--cgfc-line-height) !important;
       line-height: var(--cgfc-line-height) !important;
     }
 
-    html[data-cgfc-normal-color] main .markdown :is(p, li, td, th, blockquote, details, summary),
-    html[data-cgfc-normal-color] main .prose :is(p, li, td, th, blockquote, details, summary) {
+    html[data-cgfc-normal-color] ${proseTextSelector} {
       color: inherit !important;
     }
 
-    html[data-cgfc-line-height] main .markdown :is(p, li, td, th, blockquote, details, summary),
-    html[data-cgfc-line-height] main .prose :is(p, li, td, th, blockquote, details, summary) {
+    html[data-cgfc-line-height] ${proseTextSelector} {
       line-height: inherit !important;
     }
 
-    html[data-cgfc-line-height] main .markdown :is(h1, h2, h3, h4),
-    html[data-cgfc-line-height] main .prose :is(h1, h2, h3, h4) {
+    html[data-cgfc-line-height] ${chatContentSelector} :is(h1, h2, h3, h4, h5, h6) {
       line-height: 1.35 !important;
     }
 
-    html[data-cgfc-code-font] main .markdown :is(pre, code),
-    html[data-cgfc-code-font] main .prose :is(pre, code),
-    html[data-cgfc-code-font] [data-message-author-role] :is(pre, code) {
+    html[data-cgfc-code-font] ${chatContentSelector} :is(pre, code, [data-markdown-copy="inline-code"]) {
       font-family: var(--cgfc-code-font) !important;
     }
 
-    html[data-cgfc-code-font-size] main .markdown :is(pre, code),
-    html[data-cgfc-code-font-size] main .prose :is(pre, code),
-    html[data-cgfc-code-font-size] [data-message-author-role] :is(pre, code) {
+    html[data-cgfc-code-font-size] ${chatContentSelector} :is(pre, code, [data-markdown-copy="inline-code"]) {
       font-size: var(--cgfc-code-font-size) !important;
     }
 
-    html[data-cgfc-code-line-height] main .markdown :is(pre, code),
-    html[data-cgfc-code-line-height] main .prose :is(pre, code),
-    html[data-cgfc-code-line-height] [data-message-author-role] :is(pre, code) {
+    html[data-cgfc-code-line-height] ${chatContentSelector} :is(pre, code, [data-markdown-copy="inline-code"]) {
       line-height: var(--cgfc-code-line-height) !important;
     }
 
-    html[data-cgfc-wrap-code] main .markdown pre,
-    html[data-cgfc-wrap-code] main .prose pre,
-    html[data-cgfc-wrap-code] [data-message-author-role] pre {
+    html[data-cgfc-wrap-code] ${chatContentSelector} pre {
       white-space: pre-wrap !important;
       overflow-wrap: anywhere !important;
     }
 
-    html[data-cgfc-bold-font] main .markdown :is(strong, b),
-    html[data-cgfc-bold-font] main .prose :is(strong, b),
-    html[data-cgfc-bold-font] [data-message-author-role] :is(strong, b) {
+    html[data-cgfc-bold-font] ${chatContentSelector} :is(strong, b) {
       font-family: var(--cgfc-bold-latin-font), var(--cgfc-bold-chinese-font), serif !important;
     }
 
-    html[data-cgfc-bold-color] main .markdown :is(strong, b),
-    html[data-cgfc-bold-color] main .prose :is(strong, b),
-    html[data-cgfc-bold-color] [data-message-author-role] :is(strong, b) {
+    html[data-cgfc-bold-color] ${chatContentSelector} :is(strong, b) {
       color: var(--cgfc-bold-color) !important;
     }
 
-    html[data-cgfc-bold-weight] main .markdown :is(strong, b),
-    html[data-cgfc-bold-weight] main .prose :is(strong, b),
-    html[data-cgfc-bold-weight] [data-message-author-role] :is(strong, b) {
+    html[data-cgfc-bold-weight] ${chatContentSelector} :is(strong, b) {
       font-weight: var(--cgfc-bold-weight) !important;
     }
 
