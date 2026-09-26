@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT 长对话统一工具箱（性能·导航·提示词·导出·排版）
 // @namespace    local.codex.chatgpt.unified
-// @version      1.6.17
-// @description  ChatGPT 长对话性能、导航、提示词、导出与排版工具箱；v1.6.17 移除思考概览 Token 标记并修复跨节点公式。
+// @version      1.6.20
+// @description  ChatGPT 长对话性能、导航、提示词、导出与排版工具箱；v1.6.20 修复短思考回答的正文被识别为思考概览。
 // @author       Codex；含 Alex S Hamilton 的 ChatGPT Lazy Chat++（GPL-3.0-or-later）
 // @homepageURL  https://github.com/zjc1772665101-source/chatgpt-unified-long-chat-toolkit
 // @supportURL   https://github.com/zjc1772665101-source/chatgpt-unified-long-chat-toolkit/issues
@@ -33,7 +33,7 @@
   const PROMPT_STORAGE_KEY = 'cgpt-unified-prompt-library-v1';
   const runtime = globalThis[RUNTIME_KEY] || (globalThis[RUNTIME_KEY] = {});
 
-  runtime.version = '1.6.17';
+  runtime.version = '1.6.20';
   // Prefer semantic attributes over generated CSS class names. New ChatGPT
   // renders a user/assistant pair under data-turn-key without legacy role nodes.
   const dom = runtime.dom = Object.freeze({
@@ -48,10 +48,8 @@
         || (node?.matches?.('[data-markdown-text-style="assistant-message"]') ? 'assistant' : '');
     },
     isThinkingOverview(node) {
-      return node instanceof Element && (
-        node.matches('[data-markdown-text-tone="tertiary"]')
-        || Boolean(node.closest('[data-chatgpt-agent-turn-start] + *'))
-      );
+      return node instanceof Element
+        && node.matches('[data-markdown-text-style="assistant-message"][data-markdown-text-tone="tertiary"]');
     },
     messageId(node) {
       return node?.closest?.('[data-message-id]')?.getAttribute('data-message-id')
@@ -10209,8 +10207,12 @@
   const TOGGLE_ID = 'cgfc-toggle';
   const PANEL_ID = 'cgfc-panel';
   const FONT_STATUS_ID = 'cgfc-font-scan-status';
-  const CHATGPT_DISCLAIMER_TEXT = 'ChatGPT 也可能会犯错。请核查重要信息。';
-  const CHATGPT_DISCLAIMER_KEY = CHATGPT_DISCLAIMER_TEXT.replace(/\s+/g, '');
+  const CHATGPT_DISCLAIMER_KEYS = new Set([
+    'ChatGPT 也可能会犯错。请核查重要信息。',
+    'ChatGPT 可能会出错。工作空间数据不会用于训练模型。',
+    'ChatGPT 可能会出错。请核查重要信息。',
+  ].map((text) => text.replace(/\s+/g, '')));
+  const CHATGPT_DISCLAIMER_SELECTOR = '[data-markdown-copy="exclude"]';
   const HIDDEN_DISCLAIMER_CLASS = 'ophel-chatgpt-disclaimer-hidden';
   const KATEX_STYLE_ID = 'cgfc-katex-resource-style';
   const RESIDUAL_WRAPPER_CLASS = 'cgfc-residual-latex';
@@ -10239,6 +10241,7 @@
     codeFont: '"JetBrains Mono"',
     fontSize: 26,
     thinkingOverviewFontSize: 18,
+    formulaFontSize: 26,
     lineHeight: 1.9,
     codeFontSize: 18,
     codeLineHeight: 1.8,
@@ -10298,7 +10301,7 @@
   const OVERRIDEABLE_SETTING_KEYS = new Set([
     'latinFont', 'chineseFont', 'boldLatinFont', 'boldChineseFont',
     'mathFont', 'mathFontMode', 'codeFont',
-    'fontSize', 'thinkingOverviewFontSize', 'lineHeight', 'codeFontSize', 'codeLineHeight',
+    'fontSize', 'thinkingOverviewFontSize', 'formulaFontSize', 'lineHeight', 'codeFontSize', 'codeLineHeight',
     'normalColor', 'boldColor', 'boldWeight',
     'fontSmoothingMode', 'textRenderingMode', 'formulaCopyBorderColor', 'messageCopyIconColor',
     'toolboxFont', 'toolboxFontSize', 'toolboxLineHeight', 'toolboxPanelWidth',
@@ -10309,7 +10312,7 @@
     'tokenSummaryTextColor', 'tokenSummaryBackgroundColor', 'tokenSummaryBorderColor',
   ]);
   const DEFAULT_DISABLED_OVERRIDE_KEYS = new Set([
-    'normalColor', 'boldColor', 'messageCopyIconColor',
+    'normalColor', 'boldColor', 'formulaFontSize', 'messageCopyIconColor',
     'toolboxTextColor', 'toolboxBackgroundColor', 'toolboxAccentColor', 'toolboxOpacity',
     'queueTextColor', 'queueBackgroundColor', 'queueAccentColor', 'queueOpacity',
     'tokenSummaryTextColor', 'tokenSummaryBackgroundColor', 'tokenSummaryBorderColor',
@@ -10329,6 +10332,7 @@
     codeFont: 'text',
     fontSize: 'number',
     thinkingOverviewFontSize: 'number',
+    formulaFontSize: 'number',
     lineHeight: 'number',
     codeFontSize: 'number',
     codeLineHeight: 'number',
@@ -10387,6 +10391,7 @@
   const numberLimits = {
     fontSize: [10, 40],
     thinkingOverviewFontSize: [10, 40],
+    formulaFontSize: [10, 64],
     lineHeight: [1, 2.8],
     codeFontSize: [10, 32],
     codeLineHeight: [1, 2.8],
@@ -10861,6 +10866,8 @@
     toggleOverrideAttr('data-cgfc-font-size', enabled('fontSize'));
     setOrRemove('--cgfc-thinking-overview-font-size', enabled('thinkingOverviewFontSize'), `${normalizeSetting('thinkingOverviewFontSize', settings.thinkingOverviewFontSize)}px`);
     toggleOverrideAttr('data-cgfc-thinking-overview-font-size', enabled('thinkingOverviewFontSize'));
+    setOrRemove('--cgfc-formula-font-size', enabled('formulaFontSize'), `${normalizeSetting('formulaFontSize', settings.formulaFontSize)}px`);
+    toggleOverrideAttr('data-cgfc-formula-font-size', enabled('formulaFontSize'));
     setOrRemove('--cgfc-line-height', enabled('lineHeight'), String(normalizeSetting('lineHeight', settings.lineHeight)));
     toggleOverrideAttr('data-cgfc-line-height', enabled('lineHeight'));
     const adjustBodyColumn = enabled('bodyColumnLeftOffset') || enabled('bodyColumnRightOffset');
@@ -12167,6 +12174,17 @@
     mathHint.textContent = 'ChatGPT 通常使用 KaTeX，因此仅修改原生 MathML 往往看不出变化。下面的兼容选项只修改 KaTeX 普通字母，不触碰 ≠、∉、根号、运算符和伸缩符号。';
     panel.appendChild(mathHint);
 
+    const formulaSizeInput = appendControl(panel, { label: '公式字号 px（行内与块公式）', key: 'formulaFontSize', type: 'number', min: 10, max: 64, step: 1 });
+    formulaSizeInput.addEventListener('input', () => {
+      if (settings.formulaFontSizeEnabled) return;
+      updateSetting('formulaFontSizeEnabled', true);
+      syncOverrideVisual(formulaSizeInput.parentElement, 'formulaFontSize');
+    });
+    const formulaSizeHint = document.createElement('p');
+    formulaSizeHint.className = 'cgfc-hint';
+    formulaSizeHint.textContent = '输入新字号会自动启用覆盖；关闭右侧开关即可恢复网页原有公式大小。';
+    panel.appendChild(formulaSizeHint);
+
     appendControl(panel, { label: '将所选公式字体用于 KaTeX 普通字母', key: 'enableKatexLetterFont', type: 'checkbox' });
 
     appendControl(panel, { label: '修复助手消息中未解析的 $...$ 公式', key: 'enableResidualLatex', type: 'checkbox' });
@@ -12401,48 +12419,32 @@
   }
 
   function isChatGPTDisclaimerText(value) {
-    return normalizeDisclaimerText(value).includes(CHATGPT_DISCLAIMER_KEY);
+    return CHATGPT_DISCLAIMER_KEYS.has(normalizeDisclaimerText(value));
   }
 
-  function findDisclaimerElement(start) {
-    let current = start instanceof HTMLElement ? start : start?.parentElement;
-    let best = null;
-
-    for (let depth = 0; current && depth < 6; depth += 1) {
-      const text = normalizeDisclaimerText(current.textContent);
-      if (text === CHATGPT_DISCLAIMER_KEY) {
-        best = current;
-        current = current.parentElement;
-        continue;
-      }
-      break;
-    }
-
-    return best;
+  function isChatGPTDisclaimerElement(element) {
+    return element.matches(CHATGPT_DISCLAIMER_SELECTOR)
+      && !element.closest(dom.message)
+      && isChatGPTDisclaimerText(element.textContent);
   }
 
   function clearStaleHiddenDisclaimers() {
     document.querySelectorAll(`.${HIDDEN_DISCLAIMER_CLASS}`).forEach((element) => {
-      if (!isChatGPTDisclaimerText(element.textContent)) element.classList.remove(HIDDEN_DISCLAIMER_CLASS);
+      if (!isChatGPTDisclaimerElement(element)) {
+        element.classList.remove(HIDDEN_DISCLAIMER_CLASS);
+      }
     });
   }
 
   function scanChatGPTDisclaimers(root) {
     const scanRoot = root instanceof Element ? root : document.body || document.documentElement;
-    if (!scanRoot || !isChatGPTDisclaimerText(scanRoot.textContent)) return;
-
-    const walker = document.createTreeWalker(scanRoot, NodeFilter.SHOW_TEXT);
-    let node;
-    while ((node = walker.nextNode())) {
-      if (!isChatGPTDisclaimerText(node.nodeValue)) continue;
-      findDisclaimerElement(node.parentElement)?.classList.add(HIDDEN_DISCLAIMER_CLASS);
-    }
-
-    // Also cover a renderer that splits the sentence across multiple text nodes.
-    scanRoot.querySelectorAll?.('span, p, div, button, a').forEach((element) => {
-      if (normalizeDisclaimerText(element.textContent) === CHATGPT_DISCLAIMER_KEY) {
-        element.classList.add(HIDDEN_DISCLAIMER_CLASS);
-      }
+    if (!scanRoot) return;
+    const candidates = [
+      ...(scanRoot.matches?.(CHATGPT_DISCLAIMER_SELECTOR) ? [scanRoot] : []),
+      ...scanRoot.querySelectorAll(CHATGPT_DISCLAIMER_SELECTOR),
+    ];
+    candidates.forEach((element) => {
+      element.classList.toggle(HIDDEN_DISCLAIMER_CLASS, isChatGPTDisclaimerElement(element));
     });
   }
 
@@ -12463,26 +12465,34 @@
       for (const mutation of mutations) {
         const target = mutation.target instanceof Element ? mutation.target : mutation.target?.parentElement;
         if (target?.closest(`#${PANEL_ID}, #${TOGGLE_ID}`)) continue;
-
-        if (mutation.type === 'characterData' && isChatGPTDisclaimerText(mutation.target?.nodeValue)) {
+        if (mutation.type === 'attributes' && mutation.attributeName === 'data-markdown-copy') {
           rootToScan = target;
           break;
         }
-
-        for (const node of mutation.addedNodes) {
-          const text = node.nodeType === Node.TEXT_NODE ? node.nodeValue : node.textContent;
-          if (!isChatGPTDisclaimerText(text)) continue;
-          rootToScan = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+        const markedTarget = target?.closest(CHATGPT_DISCLAIMER_SELECTOR);
+        if (markedTarget) {
+          rootToScan = markedTarget;
           break;
         }
-
+        for (const node of mutation.addedNodes) {
+          if (!(node instanceof Element)
+            || !(node.matches(CHATGPT_DISCLAIMER_SELECTOR) || node.querySelector(CHATGPT_DISCLAIMER_SELECTOR))) continue;
+          rootToScan = node;
+          break;
+        }
         if (rootToScan) break;
       }
 
       if (rootToScan) queueDisclaimerScan(rootToScan);
     });
 
-    observer.observe(document.documentElement, { childList: true, characterData: true, subtree: true });
+    observer.observe(document.documentElement, {
+      childList: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ['data-markdown-copy'],
+      subtree: true,
+    });
   }
 
   // These tokenizer helpers deliberately operate on strings only. Keeping the
@@ -12635,6 +12645,48 @@
       '[contenteditable="true"]', '.katex', '.MathJax', 'mjx-container', 'math', 'annotation',
       '[data-latex]', '[data-math-source]', `.${RESIDUAL_WRAPPER_CLASS}`, `#${PANEL_ID}`, `#${TOGGLE_ID}`, '[aria-hidden="true"]',
     ].join(',')));
+  }
+
+  function repairResidualBold(root) {
+    if (!root.textContent?.includes('**')) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        const proseBlock = node.parentElement?.closest('p, li, h1, h2, h3, h4, h5, h6, td, th, blockquote, figcaption');
+        if (!node.nodeValue?.includes('**') || residualExcludedElement(node.parentElement)
+          || !proseBlock || !root.contains(proseBlock)
+          || node.parentElement?.closest('strong, b, a, button')) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    const nodes = [];
+    let node;
+    while ((node = walker.nextNode())) nodes.push(node);
+
+    for (const textNode of nodes) {
+      const text = textNode.nodeValue || '';
+      const pattern = /\*\*([^*\r\n]{1,240})\*\*/g;
+      const fragment = document.createDocumentFragment();
+      let last = 0;
+      let changed = false;
+      for (const match of text.matchAll(pattern)) {
+        const start = match.index;
+        const end = start + match[0].length;
+        const content = match[1];
+        if (content.trim() !== content || isEscapedDelimiter(text, start)
+          || isEscapedDelimiter(text, end - 2)
+          || /[A-Za-z0-9_]/.test(text[start - 1] || '')
+          || /[A-Za-z0-9_]/.test(text[end] || '')) continue;
+        fragment.appendChild(document.createTextNode(text.slice(last, start)));
+        const strong = document.createElement('strong');
+        strong.textContent = content;
+        fragment.appendChild(strong);
+        last = end;
+        changed = true;
+      }
+      if (!changed) continue;
+      fragment.appendChild(document.createTextNode(text.slice(last)));
+      textNode.parentNode?.replaceChild(fragment, textNode);
+    }
   }
 
   function assistantRoleFor(element) {
@@ -12799,9 +12851,14 @@
   }
 
   function scanAssistantRoot(root) {
-    if (!settings.enableResidualLatex || !(root instanceof Element) || !root.isConnected) return false;
-    root.setAttribute(RESIDUAL_ROOT_MARKER, 'true');
+    if (!(root instanceof Element) || !root.isConnected) return false;
     let state = residualRootWork.get(root);
+    if (!state) repairResidualBold(root);
+    if (!settings.enableResidualLatex) {
+      residualRootWork.delete(root);
+      return false;
+    }
+    root.setAttribute(RESIDUAL_ROOT_MARKER, 'true');
     if (!state) {
       restoreInvalidResidualMath(root);
       repairFragmentedInlineMath(root);
@@ -12847,7 +12904,8 @@
   }
 
   function queueResidualRoot(root, invalidate = false) {
-    if (!settings.enableResidualLatex || !(root instanceof Element) || residualExcludedElement(root)) return;
+    if (!(root instanceof Element) || residualExcludedElement(root)
+      || (!settings.enableResidualLatex && !root.textContent?.includes('**'))) return;
     if (invalidate) residualRootWork.delete(root);
     residualLatexRoots.add(root);
     clearTimeout(residualLatexTimer);
@@ -12862,7 +12920,6 @@
   }
 
   function scanAssistantRoots(scanRoot) {
-    if (!settings.enableResidualLatex) return;
     collectAssistantRoots(scanRoot).forEach((root) => queueResidualRoot(root, true));
   }
 
@@ -12873,7 +12930,6 @@
       installKatexCss();
       scanAssistantRoots();
       const observer = new MutationObserver((mutations) => {
-        if (!settings.enableResidualLatex) return;
         for (const mutation of mutations) {
           const target = mutation.target instanceof Element ? mutation.target : mutation.target?.parentElement;
           if (target && (residualExcludedElement(target) || target.closest?.(`.${RESIDUAL_WRAPPER_CLASS}`))) continue;
@@ -13320,11 +13376,16 @@
       font-size: var(--cgfc-font-size) !important;
     }
 
-    html[data-cgfc-thinking-overview-font-size] main [data-chatgpt-agent-turn-start] + * [data-markdown-text-style="assistant-message"],
     html[data-cgfc-thinking-overview-font-size] main [data-markdown-text-style="assistant-message"][data-markdown-text-tone="tertiary"] {
       --markdown-font-size: var(--cgfc-thinking-overview-font-size) !important;
       --codex-chat-font-size: var(--cgfc-thinking-overview-font-size) !important;
       font-size: var(--cgfc-thinking-overview-font-size) !important;
+    }
+
+    html[data-cgfc-formula-font-size] ${chatContentSelector} .katex,
+    html[data-cgfc-formula-font-size] ${chatContentSelector} mjx-container,
+    html[data-cgfc-formula-font-size] ${chatContentSelector} math:not(.katex math):not(mjx-container math) {
+      font-size: var(--cgfc-formula-font-size) !important;
     }
 
     html[data-cgfc-line-height] ${chatContentSelector} {
