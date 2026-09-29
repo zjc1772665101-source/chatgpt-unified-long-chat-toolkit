@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT 长对话统一工具箱（性能·导航·提示词·导出·排版）
 // @namespace    local.codex.chatgpt.unified
-// @version      1.6.20
-// @description  ChatGPT 长对话性能、导航、提示词、导出与排版工具箱；v1.6.20 修复短思考回答的正文被识别为思考概览。
+// @version      1.6.24
+// @description  ChatGPT 长对话性能、导航、提示词、导出与排版工具箱；v1.6.24 修复纯附件提问的目录跳转，并保留公式修复。
 // @author       Codex；含 Alex S Hamilton 的 ChatGPT Lazy Chat++（GPL-3.0-or-later）
 // @homepageURL  https://github.com/zjc1772665101-source/chatgpt-unified-long-chat-toolkit
 // @supportURL   https://github.com/zjc1772665101-source/chatgpt-unified-long-chat-toolkit/issues
@@ -33,7 +33,7 @@
   const PROMPT_STORAGE_KEY = 'cgpt-unified-prompt-library-v1';
   const runtime = globalThis[RUNTIME_KEY] || (globalThis[RUNTIME_KEY] = {});
 
-  runtime.version = '1.6.20';
+  runtime.version = '1.6.24';
   // Prefer semantic attributes over generated CSS class names. New ChatGPT
   // renders a user/assistant pair under data-turn-key without legacy role nodes.
   const dom = runtime.dom = Object.freeze({
@@ -1479,7 +1479,8 @@
         .prompt-tools-menu > summary::-webkit-details-marker { display: none; }
         .prompt-tools-menu > summary:hover, .prompt-tools-menu > summary:focus-visible { background: color-mix(in srgb, currentColor 10%, var(--cgfc-theme-surface-secondary, #eee)); outline: none; }
         .prompt-tools-menu > summary svg { width: 17px; height: 17px; fill: currentColor; }
-        .prompt-tools-popover { position: absolute; top: calc(100% + 5px); right: 0; z-index: 10; width: 176px; max-height: min(340px, 65vh); overflow-y: auto; padding: 5px; border: 1px solid var(--cgfc-theme-border, rgba(127,127,127,.25)); border-radius: 10px; background: var(--cgfc-theme-surface-primary, var(--main-surface-primary, #222)); color: var(--cgfc-theme-text-primary, var(--text-primary, #fff)); box-shadow: 0 8px 24px rgba(0,0,0,.22); }
+        .prompt-tools-popover { position: absolute; top: calc(100% + 5px); right: 0; z-index: 10; width: 176px; max-height: min(340px, 65vh); overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; -ms-overflow-style: none; -webkit-overflow-scrolling: touch; padding: 5px; border: 1px solid var(--cgfc-theme-border, rgba(127,127,127,.25)); border-radius: 10px; background: var(--cgfc-theme-surface-primary, var(--main-surface-primary, #222)); color: var(--cgfc-theme-text-primary, var(--text-primary, #fff)); box-shadow: 0 8px 24px rgba(0,0,0,.22); }
+        .prompt-tools-popover::-webkit-scrollbar { display: none; width: 0; height: 0; }
         .prompt-tools-popover[hidden] { display: none !important; }
         .prompt-tools-heading { padding: 5px 7px 3px; color: var(--cgfc-theme-text-tertiary, #888); font-size: 10px; font-weight: 600; }
         .prompt-tools-popover button { display: block; width: 100%; padding: 6px 8px; border: 0; border-radius: 6px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
@@ -1637,6 +1638,18 @@
           toolsTrigger.focus();
         }
       });
+      const fitToolsPopover = () => {
+        if (!toolsMenu.open) return;
+        const available = this.nav.getBoundingClientRect().bottom
+          - toolsPopover.getBoundingClientRect().top - 6;
+        toolsPopover.style.maxHeight = `${Math.max(0, Math.min(340, Math.floor(available)))}px`;
+      };
+      toolsMenu.addEventListener('toggle', fitToolsPopover);
+      this.toolsMenuResizeObserver?.disconnect();
+      if (typeof ResizeObserver === 'function') {
+        this.toolsMenuResizeObserver = new ResizeObserver(fitToolsPopover);
+        this.toolsMenuResizeObserver.observe(this.nav);
+      }
 
       this.list = document.createElement('div');
       this.list.className = 'prompt-list';
@@ -7036,14 +7049,20 @@
 
     getUserMessageElements() {
       const bridgedTurns = globalThis.__cgptUnifiedRuntimeV1?.lazy?.getAllTurnNodes?.() || [];
+      // A user turn containing only an attachment has no text bubble. Its
+      // message wrapper still carries the user role and message ID.
+      const attachmentOnlyUserSelector = '[data-chatgpt-search-unit-key$=":user"]';
       const candidateSource = bridgedTurns.length
         ? bridgedTurns.flatMap((turn) => [
             ...(turn.matches?.(dom.user) ? [turn] : []),
             ...turn.querySelectorAll?.(dom.user) || [],
+            ...(turn.matches?.(attachmentOnlyUserSelector) ? [turn] : []),
+            ...turn.querySelectorAll?.(attachmentOnlyUserSelector) || [],
           ])
-        : [...document.querySelectorAll(USER_SELECTOR)];
+        : [...document.querySelectorAll(`${USER_SELECTOR}, main ${attachmentOnlyUserSelector}`)];
       const candidates = candidateSource.filter((element) => {
         if (!(element instanceof HTMLElement) || (!element.isConnected && !bridgedTurns.length)) return false;
+        if (element.matches(attachmentOnlyUserSelector) && element.querySelector(dom.user)) return false;
         if (element.parentElement?.closest(dom.user)) return false;
         if (element.closest('[hidden]')) return false;
         return true;
@@ -7173,12 +7192,15 @@
       }
     }
 
+    findApiRecordByIdentity(apiItem, records) {
+      const ids = [apiItem?.messageId, apiItem?.nodeId].filter(Boolean).map(String);
+      return records.find((record) => ids.some((id) =>
+        record.identity === `message:${id}` || record.turnKey === id)) || null;
+    }
+
     findApiRecordMatch(apiItem, records, legacyMapping = null) {
-      const identity = apiItem?.messageId ? `message:${apiItem.messageId}` : '';
-      if (identity) {
-        const exact = records.find((record) => record.identity === identity);
-        if (exact) return exact;
-      }
+      const exact = this.findApiRecordByIdentity(apiItem, records);
+      if (exact) return exact;
 
       const normalizedLabel = this.normalizeConversationText(apiItem?.fullLabel || '');
       if (normalizedLabel) {
@@ -7246,6 +7268,7 @@
         userElement,
         targetElement: this.getConversationTurnElement(userElement) || userElement,
         turnNumber: this.getConversationTurnNumber(userElement),
+        turnKey: this.getConversationTurnElement(userElement)?.getAttribute('data-turn-key') || '',
         identity: this.getConversationRecordIdentity(userElement, index),
         fullLabel: this.extractUserPromptText(userElement),
         ariaHidden: Boolean(userElement.closest('[aria-hidden="true"]')),
@@ -8149,9 +8172,11 @@
       }
 
       const records = this.collectUserMessageRecords();
-      if (currentItem?.apiMessageId) {
-        const exactRecord = records.find((record) =>
-          record.identity === `message:${currentItem.apiMessageId}`);
+      if (currentItem?.apiMessageId || currentItem?.apiNodeId) {
+        const exactRecord = this.findApiRecordByIdentity({
+          messageId: currentItem.apiMessageId,
+          nodeId: currentItem.apiNodeId,
+        }, records);
         if (exactRecord) {
           currentItem.userElement = exactRecord.userElement;
           currentItem.targetElement = exactRecord.targetElement;
@@ -8243,24 +8268,52 @@
       }
     }
 
-    requestOlderConversationHistory() {
-      const target = this.currentScrollRoot instanceof HTMLElement
+    seekConversationHistory(logicalIndex, attempt = 0) {
+      const scrollAnchor = this.currentAnswer?.isConnected
+        ? this.currentAnswer
+        : document.querySelector(`${USER_SELECTOR}, ${ASSISTANT_SELECTOR}`);
+      const target = this.currentScrollRoot instanceof HTMLElement && this.currentScrollRoot.isConnected
         ? this.currentScrollRoot
-        : this.currentAnswer?.isConnected
-          ? this.findScrollRoot(this.currentAnswer)
-          : null;
-      try {
-        if (target instanceof HTMLElement) {
-          target.scrollTo({ top: dom.scrollBounds(target).min, behavior: 'auto' });
-        } else {
-          window.scrollTo({ top: 0, behavior: 'auto' });
-        }
-      } catch (_) {
-        if (target instanceof HTMLElement) target.scrollTop = dom.scrollBounds(target).min;
-        else document.scrollingElement?.scrollTo?.(0, 0);
-      }
-      this.scheduleConversationRebuild(80);
+        : scrollAnchor ? this.findScrollRoot(scrollAnchor) : null;
+      if (!(target instanceof HTMLElement)) return false;
+
+      const bounds = dom.scrollBounds(target);
+      const desiredY = target.getBoundingClientRect().top + this.getConversationScrollOffset();
+      const records = this.collectUserMessageRecords();
+      const anchors = this.conversationItems.map((item) => {
+        const record = this.findApiRecordMatch({
+          messageId: item.apiMessageId,
+          nodeId: item.apiNodeId,
+          fullLabel: item.fullLabel,
+        }, records);
+        const element = record?.targetElement;
+        if (!this.isUsableConversationTarget(element) || this.findScrollRoot(element) !== target) return null;
+        return {
+          index: item.logicalIndex,
+          top: dom.clampScrollTop(target, target.scrollTop + element.getBoundingClientRect().top - desiredY),
+        };
+      }).filter(Boolean);
+      const before = anchors.filter((anchor) => anchor.index < logicalIndex).at(-1);
+      const after = anchors.find((anchor) => anchor.index > logicalIndex);
+      const low = before?.top ?? bounds.min;
+      const high = after?.top ?? bounds.max;
+      const span = Math.max(0, high - low);
+      const count = this.conversationItems.length;
+      const fraction = count <= 1 ? 0 : logicalIndex / (count - 1);
+      const center = logicalIndex === 0 ? low
+        : logicalIndex === count - 1 ? high
+          : before && after
+            ? low + span * (logicalIndex - before.index) / (after.index - before.index)
+            : bounds.min + (bounds.max - bounds.min) * fraction;
+      const step = Math.max(180, target.clientHeight * 0.8);
+      const seekAttempt = attempt === 23 ? 0 : attempt;
+      const sweep = logicalIndex === 0 ? seekAttempt
+        : logicalIndex === count - 1 ? -seekAttempt
+          : seekAttempt === 0 ? 0 : (seekAttempt % 2 ? 1 : -1) * Math.ceil(seekAttempt / 2);
+      const nextTop = Math.min(high, Math.max(low, center + sweep * step));
+      target.scrollTo({ top: dom.clampScrollTop(target, nextTop), behavior: 'auto' });
       this.requestFrame(true);
+      return true;
     }
 
     jumpToConversation(index) {
@@ -8298,16 +8351,16 @@
         const activated = this.activateOfficialConversationButton(logicalIndex);
         const retryDelays = activated
           ? [100, 280, 620, 1150, 1950]
-          : [0, 180, 420, 800, 1300, 2000, 2900, 4000, 5200];
+          : Array.from({ length: 24 }, (_, attempt) => attempt * 240);
         if (!activated) {
           jumpLifetime = 5900;
           globalThis.__cgptUnifiedRuntimeV1?.beginNavigationLease?.(6400);
         }
 
-        for (const delay of retryDelays) {
+        for (const [attempt, delay] of retryDelays.entries()) {
           this.scheduleConversationJumpTask(() => {
             this.syncOfficialConversationNav();
-            this.scheduleConversationRebuild(0);
+            if (attempt % 3 === 0) this.scheduleConversationRebuild(0);
             this.requestFrame(true);
 
             const liveTarget = this.resolveConversationTarget(logicalIndex);
@@ -8328,7 +8381,7 @@
               if (newlyAvailableButton instanceof HTMLButtonElement) {
                 newlyAvailableButton.click();
               } else {
-                this.requestOlderConversationHistory();
+                this.seekConversationHistory(logicalIndex, attempt);
               }
             }
           }, delay, token);
@@ -12532,7 +12585,7 @@
     return !/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}，。！？；：“”‘’]/u.test(withoutTextMacros);
   }
 
-  function tokenizeResidualLatex(input) {
+  function tokenizeResidualLatex(input, { allowNumeric = false } = {}) {
     const text = String(input ?? '');
     const tokens = [];
     let plainStart = 0;
@@ -12583,7 +12636,7 @@
 
       const content = text.slice(cursor + open.length, end);
       if (!isPlausibleResidualLatex(content)
-        || (!display && open === '$' && (content.includes('\n') || isCurrencyLikeInlineLatex(content)))) {
+        || (!display && open === '$' && (content.includes('\n') || (!allowNumeric && isCurrencyLikeInlineLatex(content))))) {
         cursor += open.length;
         continue;
       }
@@ -12721,24 +12774,42 @@
   function renderResidualMath(token) {
     const renderer = getKatexRenderer();
     if (!renderer) return null;
-    try {
+    const render = (content) => {
       const holder = document.createElement('span');
       holder.className = RESIDUAL_WRAPPER_CLASS;
       holder.dataset.cgfcResidualLatex = 'true';
       holder.dataset.cgfcResidualDisplay = token.display ? 'true' : 'false';
-      holder.dataset.cgfcLatex = token.content;
+      holder.dataset.cgfcLatex = content;
       holder.setAttribute('aria-label', token.raw);
       holder.title = token.raw;
-      renderer.render(token.content, holder, {
+      renderer.render(content, holder, {
         displayMode: Boolean(token.display),
         trust: false,
         throwOnError: true,
         strict: 'warn',
       });
       return holder;
+    };
+    try {
+      return render(token.content);
     } catch (_) {
-      return null;
+      // Markdown can consume the escape on \{ and \} after \left/\right.
+      // Retry only an otherwise rejected formula; preserve its original label.
+      const repaired = token.content.replace(/\\(left|right)\s*([{}])/g, '\\$1\\$2');
+      if (repaired === token.content) return null;
+      try {
+        return render(repaired);
+      } catch (_) {
+        return null;
+      }
     }
+  }
+
+  function isNumericMathTableCell(textNode) {
+    const cell = textNode.parentElement?.closest('td, th');
+    const table = cell?.closest('table');
+    return Boolean(table && cell.textContent?.trim() === textNode.nodeValue?.trim()
+      && table.querySelector('.katex, math, .cgfc-residual-latex'));
   }
 
   function rememberResidualMutation(parent, count = 1) {
@@ -12877,7 +12948,9 @@
     const pending = nextResidualBatch(state, RESIDUAL_MAX_TEXT_NODES);
     pending.forEach((textNode) => {
       if (!textNode.isConnected || residualExcludedElement(textNode.parentElement)) return;
-      const tokens = tokenizeResidualLatex(textNode.nodeValue || '');
+      const tokens = tokenizeResidualLatex(textNode.nodeValue || '', {
+        allowNumeric: isNumericMathTableCell(textNode),
+      });
       if (!tokens.some((token) => token.type === 'math')) return;
       const fragment = document.createDocumentFragment();
       let rendered = true;
