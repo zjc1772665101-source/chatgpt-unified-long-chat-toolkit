@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT 长对话统一工具箱（性能·导航·提示词·导出·排版）
 // @namespace    local.codex.chatgpt.unified
-// @version      1.6.24
-// @description  ChatGPT 长对话性能、导航、提示词、导出与排版工具箱；v1.6.24 修复纯附件提问的目录跳转，并保留公式修复。
+// @version      1.6.28
+// @description  ChatGPT 长对话性能、导航、提示词、导出与排版工具箱；v1.6.28 导航贴片置顶，发送队列等待正文完成。
 // @author       Codex；含 Alex S Hamilton 的 ChatGPT Lazy Chat++（GPL-3.0-or-later）
 // @homepageURL  https://github.com/zjc1772665101-source/chatgpt-unified-long-chat-toolkit
 // @supportURL   https://github.com/zjc1772665101-source/chatgpt-unified-long-chat-toolkit/issues
@@ -33,7 +33,7 @@
   const PROMPT_STORAGE_KEY = 'cgpt-unified-prompt-library-v1';
   const runtime = globalThis[RUNTIME_KEY] || (globalThis[RUNTIME_KEY] = {});
 
-  runtime.version = '1.6.24';
+  runtime.version = '1.6.28';
   // Prefer semantic attributes over generated CSS class names. New ChatGPT
   // renders a user/assistant pair under data-turn-key without legacy role nodes.
   const dom = runtime.dom = Object.freeze({
@@ -87,6 +87,65 @@
     },
   });
   runtime.lazy = runtime.lazy || null;
+  // A disappearing stop button is only a pause, not proof that the final answer
+  // finished. Thinking summaries can have their own copy button and markdown.
+  runtime.readQueueResponseState = () => {
+    const main = document.querySelector('main');
+    const visible = (node) => {
+      if (!(node instanceof HTMLElement) || !node.isConnected) return false;
+      const style = getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden'
+        && rect.width > 0 && rect.height > 0;
+    };
+    const stopSelector = '[data-testid="stop-button"], [data-testid="composer-stop-button"], [data-testid*="stop-generating"]';
+    const composer = document.querySelector('#prompt-textarea, textarea[name="prompt-textarea"]');
+    const composerShell = composer?.closest('form, [data-chatgpt-composer], [data-testid*="composer"]');
+    const stopLabel = /^(?:stop(?: (?:generating|streaming|response))?|停止(?:生成|回答)?|中止生成)$/i;
+    let busy = Array.from(document.querySelectorAll(stopSelector)).some(visible)
+      || Array.from(composerShell?.querySelectorAll('button, [role="button"]') || []).some((button) =>
+        visible(button) && stopLabel.test((button.getAttribute('aria-label') || button.getAttribute('title') || button.textContent || '').trim()));
+    if (!main) return { busy, complete: false, signature: 'no-main', hasUser: false };
+    const users = Array.from(main.querySelectorAll(dom.user));
+    const user = users[users.length - 1];
+    const after = (left, right) => Boolean(left && right && (left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING));
+    const assistants = Array.from(main.querySelectorAll(dom.assistant)).filter((node) => !user || after(user, node));
+    const latest = assistants[assistants.length - 1];
+    const turns = Array.from(main.querySelectorAll(dom.turn));
+    const scope = latest?.closest(dom.turn) || user?.closest(dom.turn) || turns[turns.length - 1] || main;
+    const overviewSelector = '[data-markdown-text-style="assistant-message"][data-markdown-text-tone="tertiary"]';
+    const bodies = assistants.filter((node) => !dom.isThinkingOverview(node)
+      && !node.closest(overviewSelector)
+      // Legacy role wrappers can contain only a thinking overview.
+      && !(node.querySelector(overviewSelector) && !node.matches('[data-markdown-text-style="assistant-message"]')
+        && !node.querySelector('.markdown:not([data-markdown-text-tone="tertiary"]), [data-markdown-text-style="assistant-message"]:not([data-markdown-text-tone="tertiary"])')));
+    const body = bodies[bodies.length - 1];
+    const text = dom.messageText(body).trim();
+    const activeLabel = /^(?:正在思考|思考中|正在搜索|搜索中|正在研究|正在处理|正在生成|正在回答|Thinking|Reasoning|Searching|Working|Generating)(?:\s*[.…]*)$/i;
+    const activeNodes = scope.querySelectorAll('[aria-busy="true"], [data-is-streaming="true"], [data-is-generating="true"], [role="status"], [aria-live], button, [data-testid*="thinking"], [data-testid*="reasoning"]');
+    busy ||= (scope.matches('[aria-busy="true"], [data-is-streaming="true"], [data-is-generating="true"]') && visible(scope))
+      || Array.from(activeNodes).some((node) => visible(node) && (
+        node.matches('[aria-busy="true"], [data-is-streaming="true"], [data-is-generating="true"]')
+        || activeLabel.test((node.getAttribute('aria-label') || node.textContent || '').trim())
+      ));
+    // Require the final response's feedback controls. A copy button alone also
+    // appears under interim answers and reasoning summaries (the reported bug).
+    const content = dom.contentRoot(body);
+    const responseScope = body?.closest(dom.turn) || body?.closest('[data-message-id]') || body?.parentElement;
+    const feedback = Array.from(responseScope?.querySelectorAll('button, [role="button"]') || []).filter((button) =>
+      visible(button) && !button.closest(overviewSelector) && !content?.contains(button) && after(content, button));
+    const hasFeedback = feedback.some((button) => {
+      const testId = button.getAttribute('data-testid') || '';
+      const label = (button.getAttribute('aria-label') || button.getAttribute('title') || '').trim();
+      return /^(?:(?:good-response|bad-response)(?:-turn-action-button)?|thumbs-up-button|thumbs-down-button)$/.test(testId)
+        || /^(?:Good response|Bad response|Like response|Dislike response|回答不错|回答不好|好的回答|不好的回答|好的回复|不好的回复|好评|差评|喜欢|不喜欢|赞|踩)$/i.test(label);
+    });
+    const hasUser = Boolean(user);
+    const empty = !hasUser && !assistants.length && !/\/c\//.test(location.pathname);
+    const complete = !busy && (empty || Boolean(text && hasFeedback));
+    const identity = dom.messageId(user) || user?.closest(dom.turn)?.getAttribute('data-turn-key') || '';
+    return { busy, complete, hasUser, signature: `${identity}:${users.length}:${assistants.length}:${text.length}:${text.slice(-400)}:${hasFeedback}` };
+  };
   runtime.navigationLeaseTimer = 0;
   runtime.beginNavigationLease = (duration = 3200) => {
     const root = document.documentElement;
@@ -817,7 +876,7 @@
       window.visualViewport?.addEventListener('scroll', this.onViewportChange, { passive: true });
       this.scheduleRefresh(true);
       this.refreshTimer = window.setInterval(() => {
-        if (!this.active) return;
+        if (!this.active || document.hidden) return;
         this.bindObserver();
         const routeChanged = location.href !== this.href;
         if (routeChanged) {
@@ -983,10 +1042,9 @@
     }
 
     extractAttachedContent(roleNode) {
-      const source = dom.contentRoot(roleNode);
-      const clone = source.cloneNode(true);
-      clone.querySelectorAll?.(`[${this.chipAttr}]`).forEach((node) => node.remove());
-      return normalizeText(clone.innerText || clone.textContent || '');
+      // Token chips are appended as direct children of the role node. The
+      // shared text reader skips them without cloning a potentially huge answer.
+      return normalizeText(dom.messageText(roleNode));
     }
 
     getMessageStats(roleNode) {
@@ -1419,6 +1477,7 @@
       this.draggedPromptId = null;
       this.suppressPromptClickUntil = 0;
       this.promptViews = new WeakMap();
+      this.usagePersistTimer = 0;
     }
 
     normalizeLibrary(value) {
@@ -1446,6 +1505,16 @@
     persist() {
       storageWrite(PROMPT_STORAGE_KEY, this.prompts);
       this.onCountChange?.(this.count);
+    }
+
+    scheduleUsagePersist() {
+      if (this.usagePersistTimer) return;
+      // Usage metadata does not affect the cards. Save it after the composer
+      // has had a chance to paint instead of blocking the click handler.
+      this.usagePersistTimer = window.setTimeout(() => {
+        this.usagePersistTimer = 0;
+        this.persist();
+      }, 120);
     }
 
     mount({ shadow, nav, onCountChange }) {
@@ -2123,8 +2192,7 @@
       if (resolved == null || !this.insertIntoComposer(resolved)) return;
       item.useCount += 1;
       item.lastUsedAt = new Date().toISOString();
-      this.persist();
-      this.render();
+      this.scheduleUsagePersist();
     }
 
     queuePrompt(item) {
@@ -2135,7 +2203,6 @@
       item.useCount += 1;
       item.lastUsedAt = new Date().toISOString();
       this.persist();
-      this.render();
       this.renderQueue();
     }
 
@@ -2399,25 +2466,20 @@
       const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       let button = null;
       for (let attempt = 0; attempt < 24; attempt += 1) {
+        if (runtime.isGenerating?.() || runtime.readQueueResponseState().busy) return false;
         button = this.findSendButton(composer);
         if (button) break;
-        if (runtime.isGenerating?.()) return false;
         await wait(100);
       }
 
+      // Recheck after uploads and React's send-button updates. Do not bypass a
+      // missing/disabled send control with requestSubmit during a thinking gap.
+      if (!button || runtime.isGenerating?.() || !runtime.readQueueResponseState().complete) return false;
       runtime.armSendGuard?.();
       let dispatched = false;
       if (button) {
         button.click();
         dispatched = true;
-      } else {
-        const form = composer.closest('form');
-        if (form && typeof form.requestSubmit === 'function') {
-          try {
-            form.requestSubmit();
-            dispatched = true;
-          } catch {}
-        }
       }
       if (!dispatched) return false;
 
@@ -2506,12 +2568,12 @@
       this.idleCount = 0;
       this.isDispatching = false;
       this.awaitingResponse = null;
+      this.readySignature = '';
+      this.readySince = 0;
       this.POLL_INTERVAL = 1000;
       this.IDLE_THRESHOLD = 2;
       this.POST_SUBMIT_MIN_WAIT_MS = 2500;
-      this.POST_SUBMIT_QUIET_MS = 2500;
-      this.GENERATION_START_GRACE_MS = 8000;
-      this.POST_SUBMIT_MAX_WAIT_MS = 600000;
+      this.POST_SUBMIT_QUIET_MS = 3500;
     }
 
     snapshot() {
@@ -2712,6 +2774,7 @@
     }
 
     isGenerating() {
+      if (this.runtime.readQueueResponseState?.().busy) return true;
       if (typeof this.runtime.isGenerating === 'function') {
         try { return Boolean(this.runtime.isGenerating()); } catch {}
       }
@@ -2727,10 +2790,23 @@
     }
 
     getConversationActivitySignature() {
-      const assistants = document.querySelectorAll(`main ${dom.assistant}`);
-      const last = assistants[assistants.length - 1];
-      const text = dom.messageText(last);
-      return `${assistants.length}:${text.length}:${text.slice(Math.max(0, text.length - 400))}`;
+      return this.runtime.readQueueResponseState().signature;
+    }
+
+    isResponseReadyToSend() {
+      const response = this.runtime.readQueueResponseState();
+      if (this.isGenerating() || !response.complete) {
+        this.readySignature = '';
+        this.readySince = 0;
+        return false;
+      }
+      const signature = `${this.getConversationId()}:${response.signature}`;
+      if (signature !== this.readySignature) {
+        this.readySignature = signature;
+        this.readySince = Date.now();
+        return false;
+      }
+      return Date.now() - this.readySince >= this.POST_SUBMIT_QUIET_MS;
     }
 
     getLatestUserTurnSignature() {
@@ -2744,7 +2820,9 @@
         .replace(/[\u200B\u200C\u200D\uFEFF]/g, '')
         .replace(/\s+/g, ' ')
         .trim();
-      return `${users.length}:${messageId}:${text.length}:${text.slice(Math.max(0, text.length - 240))}`;
+      // Parking/remounting older messages changes the mounted count without
+      // advancing the latest user turn. Prefer the stable message identity.
+      return `${messageId || `mounted-${users.length}`}:${text.length}:${text.slice(Math.max(0, text.length - 240))}`;
     }
 
     hasUserTurnAdvanced(item) {
@@ -2759,40 +2837,48 @@
       this.emit();
     }
 
-    startPostSubmitWait() {
+    startPostSubmitWait(userBaseline) {
       const now = Date.now();
       this.awaitingResponse = {
         sentAt: now,
         lastActivityAt: now,
         signature: this.getConversationActivitySignature(),
-        sawGenerating: this.isGenerating(),
+        userBaseline,
+        conversationId: this.getConversationId(),
       };
       this.idleCount = 0;
+      this.readySignature = '';
+      this.readySince = 0;
     }
 
     updatePostSubmitWait() {
       const state = this.awaitingResponse;
       if (!state) return false;
       const now = Date.now();
+      const conversationId = this.getConversationId();
+      if (state.conversationId && state.conversationId !== conversationId) return true;
+      if (!state.conversationId && conversationId) state.conversationId = conversationId;
       const generating = this.isGenerating();
       if (generating) {
-        state.sawGenerating = true;
         state.lastActivityAt = now;
       }
-      const signature = this.getConversationActivitySignature();
+      const response = this.runtime.readQueueResponseState();
+      const signature = response.signature;
       if (signature !== state.signature) {
         state.signature = signature;
         state.lastActivityAt = now;
       }
       const elapsed = now - state.sentAt;
       const quietFor = now - state.lastActivityAt;
-      const generationHadTimeToStart = state.sawGenerating || elapsed >= this.GENERATION_START_GRACE_MS;
+      const userTurnAdvanced = Boolean(state.userBaseline
+        && this.getLatestUserTurnSignature() !== state.userBaseline);
       const done = (
         elapsed >= this.POST_SUBMIT_MIN_WAIT_MS
         && quietFor >= this.POST_SUBMIT_QUIET_MS
         && !generating
-        && generationHadTimeToStart
-      ) || elapsed >= this.POST_SUBMIT_MAX_WAIT_MS;
+        && userTurnAdvanced
+        && response.complete
+      );
       if (done) {
         this.awaitingResponse = null;
         this.idleCount = 0;
@@ -2840,7 +2926,7 @@
         this.idleCount = 0;
         return;
       }
-      if (this.isGenerating()) {
+      if (!this.isResponseReadyToSend()) {
         this.idleCount = 0;
         return;
       }
@@ -2859,7 +2945,7 @@
       item.error = '';
       this.emit();
       try {
-        if (this.isGenerating() || promptLibrary.hasComposerPayload()) {
+        if (!this.isResponseReadyToSend() || promptLibrary.hasComposerPayload()) {
           item.status = 'pending';
           return;
         }
@@ -2895,7 +2981,7 @@
         const submitted = await promptLibrary.submitComposer();
         if (submitted || this.hasUserTurnAdvanced(item) || !promptLibrary.composerMatchesQueueItem(item)) {
           this.completeItem(item.id);
-          this.startPostSubmitWait();
+          this.startPostSubmitWait(item.submitBaseline);
         } else {
           // Keep the item in "sending" instead of immediately retrying. The
           // recovery path waits for another confirmed idle window first.
@@ -2925,7 +3011,11 @@
       }
       if (this.hasUserTurnAdvanced(item) || !promptLibrary.composerMatchesQueueItem(item)) {
         this.completeItem(item.id);
-        this.startPostSubmitWait();
+        this.startPostSubmitWait(item.submitBaseline);
+        return;
+      }
+      if (!this.isResponseReadyToSend()) {
+        this.idleCount = 0;
         return;
       }
       this.idleCount += 1;
@@ -2937,7 +3027,7 @@
         const submitted = await promptLibrary.submitComposer();
         if (submitted || this.hasUserTurnAdvanced(item) || !promptLibrary.composerMatchesQueueItem(item)) {
           this.completeItem(item.id);
-          this.startPostSubmitWait();
+          this.startPostSubmitWait(item.submitBaseline);
         }
       } catch (error) {
         console.error('[发送队列] 重试发送失败：', error);
@@ -3756,14 +3846,18 @@
 
     scheduleMutationPosition(records) {
       const ownUi = '#cgpt-unified-queue-dock, #cgpt-unified-token-stats, [data-cgpt-token-chip]';
-      const externalChange = records.some((record) => {
+      const composerSelector = '#prompt-textarea, .ProseMirror[contenteditable="true"], textarea[name="prompt-textarea"], [contenteditable="true"][role="textbox"]';
+      const composerChanged = records.some((record) => {
         const target = record.target?.nodeType === Node.ELEMENT_NODE
           ? record.target : record.target?.parentElement;
         if (target?.closest?.(ownUi)) return false;
+        if (this.observedShell && (target === this.observedShell || this.observedShell.contains(target))) return true;
         const changed = [...record.addedNodes, ...record.removedNodes];
-        return !changed.length || !changed.every((node) => node instanceof Element && node.matches(ownUi));
+        return changed.some((node) => node instanceof Element && (
+          node.matches(composerSelector) || node.querySelector(composerSelector)
+        ));
       });
-      if (!externalChange || this.mutationPositionTimer) return;
+      if (!composerChanged || this.mutationPositionTimer) return;
       // Streamed answer DOM can change every frame. Scroll/resize still use rAF directly.
       this.mutationPositionTimer = window.setTimeout(() => {
         this.mutationPositionTimer = 0;
@@ -4436,6 +4530,10 @@
       host.hidden = true;
       host.setAttribute('data-cgpt-answer-toc', '');
       host.dataset.dockSide = 'right';
+      // A manual popover enters the browser top layer without making the page
+      // modal. Max z-index remains the fallback for older browsers.
+      if (typeof host.showPopover === 'function') host.setAttribute('popover', 'manual');
+      host.style.setProperty('z-index', '2147483647', 'important');
 
       const shadow = host.attachShadow({ mode: 'open' });
       shadow.innerHTML = `
@@ -4445,7 +4543,15 @@
             position: fixed !important;
             inset-inline-end: var(--cgpt-answer-toc-inline-end, 20px) !important;
             top: 50% !important;
-            z-index: 30 !important;
+            z-index: 2147483647 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            border: 0 !important;
+            background: transparent !important;
+            overflow: visible !important;
+            bottom: auto !important;
+            inset-inline-start: auto !important;
+            isolation: isolate !important;
             width: max-content !important;
             height: max-content !important;
             display: block !important;
@@ -4471,6 +4577,11 @@
 
           :host([hidden]) {
             display: none !important;
+          }
+
+          :host::backdrop {
+            background: transparent !important;
+            pointer-events: none !important;
           }
 
           *, *::before, *::after {
@@ -5018,6 +5129,7 @@
 
       this.host = host;
       this.shadow = shadow;
+      this.installTopLayer();
       this.launcher = shadow.getElementById('launcher');
       this.panel = shadow.getElementById('panel');
       this.list = shadow.getElementById('toc-list');
@@ -6373,12 +6485,16 @@
 
       if (conversationChanged) {
         this.scheduleConversationRebuild();
-        this.scheduleApiConversationOutlineRefresh(420, true);
+        if (this.pendingConversationLogicalIndex < 0) {
+          this.scheduleApiConversationOutlineRefresh(420, true);
+        }
       }
       if (assistantAdded) {
-        this.requestFrame(true);
-        // 新回答节点出现时再补一次强制刷新，覆盖“发送后 API 尚未落库”的短窗口。
-        this.scheduleApiConversationOutlineRefresh(700, true);
+        if (this.pendingConversationLogicalIndex < 0) {
+          this.requestFrame(true);
+          // 新回答节点出现时再补一次强制刷新，覆盖“发送后 API 尚未落库”的短窗口。
+          this.scheduleApiConversationOutlineRefresh(700, true);
+        }
       }
     }
 
@@ -7353,7 +7469,9 @@
       const signature = this.getConversationSignature();
       if (signature !== this.lastConversationSignature) {
         this.scheduleConversationRebuild(40);
-        this.scheduleApiConversationOutlineRefresh(460, true);
+        if (this.pendingConversationLogicalIndex < 0) {
+          this.scheduleApiConversationOutlineRefresh(460, true);
+        }
       } else if (!this.getApiConversationOutlineForCurrentRoute()) {
         // 首次打开超长会话时 DOM 可能看起来完全没变化，但 API 目录仍需要补齐。
         this.scheduleApiConversationOutlineRefresh(120, false);
@@ -8253,6 +8371,18 @@
       return this.scrollConversationTarget(target, 'auto');
     }
 
+    isConversationTargetAligned(target) {
+      if (!this.isUsableConversationTarget(target)) return false;
+      const scrollRoot = this.findScrollRoot(target);
+      const rootRect = scrollRoot instanceof HTMLElement
+        ? scrollRoot.getBoundingClientRect()
+        : { top: 0, bottom: window.innerHeight };
+      const visibleTop = Math.max(0, rootRect.top);
+      const availableHeight = Math.max(1, Math.min(window.innerHeight, rootRect.bottom) - visibleTop);
+      const desiredTop = visibleTop + Math.min(this.getConversationScrollOffset(), availableHeight * 0.3);
+      return Math.abs(target.getBoundingClientRect().top - desiredTop) <= 24;
+    }
+
     activateOfficialConversationButton(logicalIndex) {
       const button = this.getOfficialNavButtons().find((candidate) => (
         Number.parseInt(candidate.dataset.tocItemIndex ?? '', 10) === logicalIndex
@@ -8312,7 +8442,6 @@
           : seekAttempt === 0 ? 0 : (seekAttempt % 2 ? 1 : -1) * Math.ceil(seekAttempt / 2);
       const nextTop = Math.min(high, Math.max(low, center + sweep * step));
       target.scrollTo({ top: dom.clampScrollTop(target, nextTop), behavior: 'auto' });
-      this.requestFrame(true);
       return true;
     }
 
@@ -8323,30 +8452,32 @@
 
       this.cancelConversationJump();
       globalThis.__cgptUnifiedRuntimeV1?.beginNavigationLease?.(3600);
-      globalThis.__cgptUnifiedRuntimeV1?.lazy?.revealAllForNavigation?.();
       const token = this.conversationJumpToken;
       const logicalIndex = item.logicalIndex;
       this.pendingConversationLogicalIndex = logicalIndex;
       this.pendingConversationUntil = performance.now() + 2600;
       this.applyActiveConversationIndex(index, true);
 
-      const initialTarget = this.resolveConversationTarget(logicalIndex);
+      let initialTarget = this.resolveConversationTarget(logicalIndex);
+      if (!this.isUsableConversationTarget(initialTarget)) {
+        globalThis.__cgptUnifiedRuntimeV1?.lazy?.revealAllForNavigation?.();
+        initialTarget = this.resolveConversationTarget(logicalIndex) || initialTarget;
+      }
       const canDirectlyScroll = this.isUsableConversationTarget(initialTarget);
       let jumpLifetime = 2250;
+      let jumpSettled = false;
 
       if (canDirectlyScroll) {
-        this.scrollConversationTarget(
-          initialTarget,
-          this.getConversationJumpBehavior(),
-        );
-
-        for (const delay of [460, 980, 1700]) {
-          this.scheduleConversationJumpTask(() => {
-            const liveTarget = this.resolveConversationTarget(logicalIndex) || initialTarget;
+        const behavior = this.getConversationJumpBehavior();
+        this.scrollConversationTarget(initialTarget, behavior);
+        this.scheduleConversationJumpTask(() => {
+          const liveTarget = this.resolveConversationTarget(logicalIndex) || initialTarget;
+          if (this.isUsableConversationTarget(liveTarget)
+            && !this.isConversationTargetAligned(liveTarget)) {
             this.correctConversationTargetPosition(liveTarget);
-            this.requestFrame(true);
-          }, delay, token);
-        }
+          }
+          this.requestFrame(true);
+        }, behavior === 'smooth' ? 1050 : 220, token);
       } else {
         const activated = this.activateOfficialConversationButton(logicalIndex);
         const retryDelays = activated
@@ -8357,15 +8488,21 @@
           globalThis.__cgptUnifiedRuntimeV1?.beginNavigationLease?.(6400);
         }
 
-        for (const [attempt, delay] of retryDelays.entries()) {
+        const retry = (attempt) => {
+          const delay = retryDelays[attempt];
           this.scheduleConversationJumpTask(() => {
-            this.syncOfficialConversationNav();
-            if (attempt % 3 === 0) this.scheduleConversationRebuild(0);
-            this.requestFrame(true);
+            if (jumpSettled) return;
+            if (attempt === 0 || attempt === 3) {
+              this.syncOfficialConversationNav();
+              this.scheduleConversationRebuild(0);
+            }
 
             const liveTarget = this.resolveConversationTarget(logicalIndex);
             if (this.isUsableConversationTarget(liveTarget)) {
+              jumpSettled = true;
+              this.pendingConversationUntil = performance.now() + 800;
               this.correctConversationTargetPosition(liveTarget);
+              this.requestFrame(true);
               return;
             }
 
@@ -8384,11 +8521,15 @@
                 this.seekConversationHistory(logicalIndex, attempt);
               }
             }
-          }, delay, token);
-        }
+            if (attempt + 1 < retryDelays.length) retry(attempt + 1);
+          }, attempt === 0 ? delay : delay - retryDelays[attempt - 1], token);
+        };
+        retry(0);
       }
 
+      this.pendingConversationUntil = performance.now() + Math.max(2600, jumpLifetime + 100);
       this.scheduleConversationJumpTask(() => {
+        jumpSettled = true;
         this.pendingConversationLogicalIndex = -1;
         this.pendingConversationUntil = 0;
         this.requestFrame(true);
@@ -8398,6 +8539,63 @@
           }
         }, 240);
       }, jumpLifetime, token);
+    }
+
+    syncTopLayer(raise = false) {
+      const host = this.host;
+      if (!host || !host.hasAttribute('popover')) return;
+      let modal = null;
+      try {
+        const modals = document.querySelectorAll('dialog:modal');
+        modal = modals[modals.length - 1] || null;
+      } catch {}
+      // Outside a native modal dialog, even top-layer elements can be inert.
+      // Keep the same host/shadow tree inside the modal until it closes.
+      const parent = modal || document.body;
+      const focused = this.shadow?.activeElement;
+      try {
+        if (host.parentElement !== parent) {
+          if (host.matches(':popover-open')) host.hidePopover();
+          parent.appendChild(host);
+        }
+        if (host.hidden) {
+          if (host.matches(':popover-open')) host.hidePopover();
+          return;
+        }
+        if (raise && host.matches(':popover-open')) host.hidePopover();
+        if (!host.matches(':popover-open')) host.showPopover();
+        if (focused && this.shadow.activeElement !== focused) focused.focus({ preventScroll: true });
+      } catch {
+        // Retain the visible fixed-position fallback if this browser rejects
+        // popovers, rather than leaving the entire toolbox UA-hidden.
+        host.removeAttribute('popover');
+      }
+    }
+
+    installTopLayer() {
+      if (!this.host?.hasAttribute('popover')) return;
+      let frame = 0;
+      let raise = false;
+      const schedule = (shouldRaise = false) => {
+        raise ||= shouldRaise;
+        if (frame) return;
+        frame = window.requestAnimationFrame(() => {
+          frame = 0;
+          this.syncTopLayer(raise);
+          raise = false;
+        });
+      };
+      document.addEventListener('toggle', (event) => {
+        if (event.target === this.host || !(event.target instanceof Element)) return;
+        if (event.target.matches('dialog, [popover]')) schedule(event.newState === 'open');
+      }, true);
+      this.topLayerObserver = new MutationObserver((records) => {
+        if (records.some((record) => (record.type === 'attributes' && record.target.matches('dialog'))
+          || Array.from(record.addedNodes).some((node) => node instanceof Element
+            && (node.matches('dialog[open]') || node.querySelector('dialog[open]')))
+          || !this.host.isConnected)) schedule(true);
+      });
+      this.topLayerObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['open'] });
     }
 
     isViewportEligible() {
@@ -8414,6 +8612,7 @@
       const hasAnyNavigation =
         this.conversationItems.length > 0 || this.headings.length > 0 || Boolean(this.promptLibrary);
       this.host.hidden = !this.isViewportEligible() || !hasAnyNavigation;
+      this.syncTopLayer();
 
       if (this.host.hidden && this.transientHoverOpen) {
         this.transientHoverOpen = false;
@@ -9607,6 +9806,7 @@
     }
 
     function revealAllForNavigation() {
+      if (!hiddenStore.length) return 0;
       const total = getTotalTurns();
       const base = currentRetain(total);
       revealExtra = Math.max(0, total - base);
@@ -10235,7 +10435,11 @@
           scheduleApply({ preserveAnchor: false, force: false });
         }
 
-        if (getTurns().length > 0 || --tries <= 0) clearInterval(hydrationPoll);
+        // Current ChatGPT uses data-turn-key without legacy turn hosts. Once
+        // that layout is visible, further legacy hydration probes cannot help.
+        if (getTurns().length > 0 || document.querySelector('main [data-turn-key]') || --tries <= 0) {
+          clearInterval(hydrationPoll);
+        }
       }, 260);
     }
 
@@ -10270,7 +10474,8 @@
   const KATEX_STYLE_ID = 'cgfc-katex-resource-style';
   const RESIDUAL_WRAPPER_CLASS = 'cgfc-residual-latex';
   const RESIDUAL_ROOT_MARKER = 'data-cgfc-residual-root';
-  const RESIDUAL_DEBOUNCE_MS = 180;
+  // A full answer scan is expensive; wait for a short pause in streaming DOM updates.
+  const RESIDUAL_DEBOUNCE_MS = 500;
   const RESIDUAL_MAX_TEXT_NODES = 300;
   const STORAGE_KEY = 'chatgpt_font_customizer_settings_v2';
   const THEME_PALETTE_MIGRATION_KEY = 'cgpt_unified_theme_palette_migration_v1';
