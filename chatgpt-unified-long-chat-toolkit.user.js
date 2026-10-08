@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT 长对话统一工具箱（性能·导航·提示词·导出·排版）
 // @namespace    local.codex.chatgpt.unified
-// @version      1.6.28
-// @description  ChatGPT 长对话性能、导航、提示词、导出与排版工具箱；v1.6.28 导航贴片置顶，发送队列等待正文完成。
+// @version      1.6.33
+// @description  ChatGPT 长对话性能、导航、提示词、导出与排版工具箱；v1.6.33 移除输入区的全宽黑色遮罩，保留立即发送按钮。
 // @author       Codex；含 Alex S Hamilton 的 ChatGPT Lazy Chat++（GPL-3.0-or-later）
 // @homepageURL  https://github.com/zjc1772665101-source/chatgpt-unified-long-chat-toolkit
 // @supportURL   https://github.com/zjc1772665101-source/chatgpt-unified-long-chat-toolkit/issues
@@ -33,7 +33,7 @@
   const PROMPT_STORAGE_KEY = 'cgpt-unified-prompt-library-v1';
   const runtime = globalThis[RUNTIME_KEY] || (globalThis[RUNTIME_KEY] = {});
 
-  runtime.version = '1.6.28';
+  runtime.version = '1.6.33';
   // Prefer semantic attributes over generated CSS class names. New ChatGPT
   // renders a user/assistant pair under data-turn-key without legacy role nodes.
   const dom = runtime.dom = Object.freeze({
@@ -61,7 +61,8 @@
     contentRoot(node) {
       if (!(node instanceof Element)) return null;
       return node.matches(this.content) ? node
-        : node.querySelector(`${this.content}, [data-message-content], .whitespace-pre-wrap`) || node;
+        : node.querySelector(`${this.content}:not([data-markdown-text-tone="tertiary"]):not([data-markdown-text-tone="tertiary"] *)`)
+          || node.querySelector(`${this.content}, [data-message-content], .whitespace-pre-wrap`) || node;
     },
     messageText(node) {
       const source = this.contentRoot(node);
@@ -112,7 +113,17 @@
     const assistants = Array.from(main.querySelectorAll(dom.assistant)).filter((node) => !user || after(user, node));
     const latest = assistants[assistants.length - 1];
     const turns = Array.from(main.querySelectorAll(dom.turn));
-    const scope = latest?.closest(dom.turn) || user?.closest(dom.turn) || turns[turns.length - 1] || main;
+    // Action bars can be siblings of a nested data-turn-key wrapper. Stay in
+    // the current response, but include its outer turn instead of that wrapper.
+    const responseTurn = (node) => {
+      let scope = node?.closest(dom.turn) || node?.closest('[data-message-id]') || node?.parentElement;
+      for (let parent = scope?.parentElement; parent && parent !== main; parent = parent.parentElement) {
+        if (parent.querySelectorAll(dom.user).length > (user && parent.contains(user) ? 1 : 0)) break;
+        if (parent.matches(dom.turn)) scope = parent;
+      }
+      return scope;
+    };
+    const scope = responseTurn(latest) || user?.closest(dom.turn) || turns[turns.length - 1] || main;
     const overviewSelector = '[data-markdown-text-style="assistant-message"][data-markdown-text-tone="tertiary"]';
     const bodies = assistants.filter((node) => !dom.isThinkingOverview(node)
       && !node.closest(overviewSelector)
@@ -126,25 +137,34 @@
     busy ||= (scope.matches('[aria-busy="true"], [data-is-streaming="true"], [data-is-generating="true"]') && visible(scope))
       || Array.from(activeNodes).some((node) => visible(node) && (
         node.matches('[aria-busy="true"], [data-is-streaming="true"], [data-is-generating="true"]')
-        || activeLabel.test((node.getAttribute('aria-label') || node.textContent || '').trim())
+        // A retained Thinking disclosure is a history control after completion.
+        || (!node.matches('button, [role="button"], summary, [data-state="closed"], [data-state="open"]')
+          && activeLabel.test((node.getAttribute('aria-label') || node.textContent || '').trim()))
       ));
-    // Require the final response's feedback controls. A copy button alone also
-    // appears under interim answers and reasoning summaries (the reported bug).
+    // Completion actions belong to the current final body. They may be hidden
+    // until hover or outside a nested message wrapper; layout is not required.
+    // Copy alone is still insufficient: reasoning/interim content can have it.
     const content = dom.contentRoot(body);
-    const responseScope = body?.closest(dom.turn) || body?.closest('[data-message-id]') || body?.parentElement;
+    const responseScope = responseTurn(body);
     const feedback = Array.from(responseScope?.querySelectorAll('button, [role="button"]') || []).filter((button) =>
-      visible(button) && !button.closest(overviewSelector) && !content?.contains(button) && after(content, button));
+      button.isConnected && !button.closest(`${overviewSelector}, details, [data-testid*="thinking"], [data-testid*="reasoning"], pre, code`)
+      && (!content?.contains(button) || (content === body && !body.matches(dom.content)))
+      && after(content, button));
     const hasFeedback = feedback.some((button) => {
       const testId = button.getAttribute('data-testid') || '';
       const label = (button.getAttribute('aria-label') || button.getAttribute('title') || '').trim();
       return /^(?:(?:good-response|bad-response)(?:-turn-action-button)?|thumbs-up-button|thumbs-down-button)$/.test(testId)
-        || /^(?:Good response|Bad response|Like response|Dislike response|回答不错|回答不好|好的回答|不好的回答|好的回复|不好的回复|好评|差评|喜欢|不喜欢|赞|踩)$/i.test(label);
+        || /^(?:Good response|Bad response|Like response|Dislike response|Rate (?:this )?response|评价回复|评价回答|回答不错|回答不好|好的回答|不好的回答|好的回复|不好的回复|好评|差评|喜欢|不喜欢|赞|踩)$/i.test(label)
+        || /^(?:read-aloud|regenerate|retry|share)(?:-response)?(?:-turn-action)?-button$/.test(testId)
+        || /^(?:Read aloud|Regenerate(?: response)?|Try again|Retry|Share(?: response)?|朗读|大声朗读|重新生成(?:回答|回复)?|重试|再试一次|分享(?:回答|回复)?)$/i.test(label);
     });
     const hasUser = Boolean(user);
     const empty = !hasUser && !assistants.length && !/\/c\//.test(location.pathname);
     const complete = !busy && (empty || Boolean(text && hasFeedback));
     const identity = dom.messageId(user) || user?.closest(dom.turn)?.getAttribute('data-turn-key') || '';
-    return { busy, complete, hasUser, signature: `${identity}:${users.length}:${assistants.length}:${text.length}:${text.slice(-400)}:${hasFeedback}` };
+    // Historical message parking must not restart the completion quiet window.
+    const responseId = dom.messageId(body) || body?.closest(dom.turn)?.getAttribute('data-turn-key') || '';
+    return { busy, complete, hasUser, signature: `${identity}:${responseId}:${text.length}:${text.slice(-400)}:${hasFeedback}` };
   };
   runtime.navigationLeaseTimer = 0;
   runtime.beginNavigationLease = (duration = 3200) => {
@@ -178,7 +198,7 @@
   function nodeToMarkdown(node, depth = 0) {
     if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || '';
     if (!(node instanceof Element)) return '';
-    if (node.matches('button, script, style, svg, [aria-hidden="true"], [role="tooltip"], [data-cgpt-token-chip]')) return '';
+    if (node.matches('button, script, style, svg, [aria-hidden="true"], [role="button"], [role="tooltip"], [data-cgpt-token-chip], .cgpt-unified-copy-message-md')) return '';
 
     const tag = node.tagName.toLowerCase();
     const children = () => Array.from(node.childNodes).map((child) => nodeToMarkdown(child, depth)).join('');
@@ -199,21 +219,39 @@
       const src = node.getAttribute('src') || '';
       return src ? `![${escapeMarkdown(node.getAttribute('alt') || '图片')}](${src})` : '';
     }
-    if (tag === 'strong' || tag === 'b') return `**${text()}**`;
+    if (tag === 'strong' || tag === 'b' || node.matches('[data-d-component="text"][data-d-default-strong], [data-d-component="text"][data-d-weight="bold"]')) return `**${text()}**`;
     if (tag === 'em' || tag === 'i') return `*${text()}*`;
     if ((tag === 'code' && node.parentElement?.tagName.toLowerCase() !== 'pre')
-      || node.matches('[data-markdown-copy="inline-code"]')) return `\`${children()}\``;
+      || node.matches('[data-markdown-copy="inline-code"]')) {
+      const value = node.textContent || '';
+      const runs = value.match(/`+/g) || [];
+      const fence = '`'.repeat(Math.max(0, ...runs.map((run) => run.length)) + 1);
+      const pad = /^`|`$/.test(value) || (/^ .* $/.test(value) && value.trim()) ? ' ' : '';
+      return `${fence}${pad}${value}${pad}${fence}`;
+    }
     if (tag === 'pre') {
       const code = node.querySelector('code')?.textContent ?? node.textContent ?? '';
       const language = node.querySelector('code')?.className.match(/language-([\w+-]+)/)?.[1] || '';
-      return `\n\`\`\`${language}\n${code.replace(/\n+$/, '')}\n\`\`\`\n\n`;
+      const runs = code.match(/`+/g) || [];
+      const fence = '`'.repeat(Math.max(2, ...runs.map((run) => run.length)) + 1);
+      return `\n${fence}${language}\n${code.replace(/\n+$/, '')}\n${fence}\n\n`;
     }
     if (tag === 'a') return `[${text() || node.getAttribute('href') || '链接'}](${node.getAttribute('href') || ''})`;
     if (tag === 'blockquote') return `${text().split('\n').map((line) => `> ${line}`).join('\n')}\n\n`;
     if (tag === 'li') {
       const parentTag = node.parentElement?.tagName.toLowerCase();
+      const start = Number.parseInt(node.parentElement?.getAttribute('start'), 10);
+      const siblings = Array.from(node.parentElement?.children || []).filter((child) => child.tagName.toLowerCase() === 'li');
+      const step = node.parentElement?.hasAttribute('reversed') ? -1 : 1;
+      let ordinal = Number.isFinite(start) ? start : step < 0 ? siblings.length : 1;
+      for (const sibling of siblings) {
+        const value = Number.parseInt(sibling.getAttribute('value'), 10);
+        if (Number.isFinite(value)) ordinal = value;
+        if (sibling === node) break;
+        ordinal += step;
+      }
       const prefix = parentTag === 'ol'
-        ? `${Array.from(node.parentElement.children).indexOf(node) + 1}. `
+        ? `${ordinal}. `
         : '- ';
       return `${'  '.repeat(Math.max(0, depth))}${prefix}${text()}\n`;
     }
@@ -222,15 +260,16 @@
     }
     if (tag === 'table') {
       const rows = Array.from(node.querySelectorAll('tr')).map((row) =>
-        Array.from(row.querySelectorAll(':scope > th, :scope > td')).map((cell) => normalizeText(cell.textContent))
+        Array.from(row.querySelectorAll(':scope > th, :scope > td')).map((cell) =>
+          normalizeText(nodeToMarkdown(cell, depth)).replace(/\|/g, '\\|').replace(/\n+/g, '<br>'))
       ).filter((row) => row.length);
       if (!rows.length) return '';
       const width = Math.max(...rows.map((row) => row.length));
       const normalizedRows = rows.map((row) => [...row, ...Array(Math.max(0, width - row.length)).fill('')]);
       const lines = [
-        `| ${normalizedRows[0].map(escapeMarkdown).join(' | ')} |`,
+        `| ${normalizedRows[0].join(' | ')} |`,
         `| ${Array(width).fill('---').join(' | ')} |`,
-        ...normalizedRows.slice(1).map((row) => `| ${row.map(escapeMarkdown).join(' | ')} |`),
+        ...normalizedRows.slice(1).map((row) => `| ${row.join(' | ')} |`),
       ];
       return `${lines.join('\n')}\n\n`;
     }
@@ -321,6 +360,8 @@
         for (const roleNode of roleNodes) {
           const role = dom.role(roleNode);
           if (role !== 'user' && role !== 'assistant') continue;
+          if (dom.isThinkingOverview(roleNode) || dom.isThinkingOverview(dom.contentRoot(roleNode))
+            || roleNode.closest('[data-markdown-text-tone="tertiary"]')) continue;
           const messageId = dom.messageId(roleNode)
             || `${turn.getAttribute('data-testid') || messages.length}:${role}`;
           if (seen.has(messageId)) continue;
@@ -745,11 +786,13 @@
         await navigator.clipboard.writeText(text);
       } catch {
         const textarea = document.createElement('textarea');
-        textarea.value = text;
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand('copy');
-        textarea.remove();
+        try {
+          textarea.value = text;
+          document.body.appendChild(textarea);
+          textarea.select();
+          return document.execCommand('copy');
+        } catch { return false; }
+        finally { textarea.remove(); }
       }
       return true;
     }
@@ -2460,7 +2503,7 @@
       }) || null;
     }
 
-    async submitComposer() {
+    async submitComposer({ immediate = false } = {}) {
       const composer = this.findComposer();
       if (!composer || !this.hasComposerPayload(composer)) return false;
       const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -2474,7 +2517,8 @@
 
       // Recheck after uploads and React's send-button updates. Do not bypass a
       // missing/disabled send control with requestSubmit during a thinking gap.
-      if (!button || runtime.isGenerating?.() || !runtime.readQueueResponseState().complete) return false;
+      const response = runtime.readQueueResponseState();
+      if (!button || runtime.isGenerating?.() || response.busy || (!immediate && !response.complete)) return false;
       runtime.armSendGuard?.();
       let dispatched = false;
       if (button) {
@@ -2936,7 +2980,29 @@
       await this.dispatchNext(pending);
     }
 
-    async dispatchNext(item) {
+    async sendNow(id) {
+      const item = this.items.find((candidate) => candidate.id === id);
+      if (!item || item.status === 'sending' || this.isDispatching) return false;
+      const reject = (message) => {
+        item.error = message;
+        this.emit();
+        return false;
+      };
+      if (this.editingItemId) return reject('请先保存或取消正在编辑的消息');
+      if (!this.isItemOnCurrentConversation(item)) return reject('请返回这条消息所属的会话后发送');
+      const promptLibrary = this.runtime.promptLibrary;
+      if (!promptLibrary?.findComposer?.()) return reject('未找到当前会话输入框');
+      if (promptLibrary.hasComposerPayload?.()) return reject('输入框已有文字或附件，请先处理草稿');
+      if (this.items.some((candidate) => candidate.status === 'sending')) return reject('已有队列消息正在提交，请稍后再试');
+      if (this.isGenerating()) return reject('当前正在生成回答，请稍后再试');
+      item.status = 'pending';
+      this.idleCount = 0;
+      await this.dispatchNext(item, { immediate: true });
+      this.start();
+      return item.status === 'sent' || item.status === 'sending';
+    }
+
+    async dispatchNext(item, { immediate = false } = {}) {
       if (!item || this.isDispatching || item.status !== 'pending') return;
       const promptLibrary = this.runtime.promptLibrary;
       if (!promptLibrary) return;
@@ -2945,7 +3011,8 @@
       item.error = '';
       this.emit();
       try {
-        if (!this.isResponseReadyToSend() || promptLibrary.hasComposerPayload()) {
+        if ((immediate ? this.isGenerating() : !this.isResponseReadyToSend())
+          || !this.isItemOnCurrentConversation(item) || promptLibrary.hasComposerPayload()) {
           item.status = 'pending';
           return;
         }
@@ -2978,7 +3045,7 @@
           return;
         }
         item.submitBaseline = this.getLatestUserTurnSignature();
-        const submitted = await promptLibrary.submitComposer();
+        const submitted = await promptLibrary.submitComposer({ immediate });
         if (submitted || this.hasUserTurnAdvanced(item) || !promptLibrary.composerMatchesQueueItem(item)) {
           this.completeItem(item.id);
           this.startPostSubmitWait(item.submitBaseline);
@@ -3161,6 +3228,7 @@
         .cgpt-queue-row-actions button:hover { background: var(--cgfc-theme-surface-primary, var(--main-surface-primary, #fff)); color: var(--cgfc-theme-text-primary, var(--text-primary, #161616)); }
         .cgpt-queue-row-actions button:active { transform: scale(.94); }
         .cgpt-queue-row-actions button:disabled { opacity: .28; cursor: default; }
+        .cgpt-queue-row-actions button.cgpt-queue-send-now { width: auto; min-width: 27px; padding: 0 6px; display: inline-flex; gap: 4px; align-items: center; font: inherit; font-size: .8em; white-space: nowrap; color: var(--cgfc-queue-accent-color, #6d5dfc); }
         .cgpt-queue-row-actions svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
         .cgpt-queue-edit-text { box-sizing: border-box; width: 100%; min-height: 48px; max-height: 140px; padding: 9px 10px; resize: none; overflow-y: hidden; scrollbar-width: none; border: 1px solid var(--cgfc-theme-border, var(--border-light, rgba(0,0,0,.15))); border-radius: 10px; background: var(--cgfc-theme-surface-primary, var(--main-surface-primary, #fff)); color: var(--cgfc-queue-text-color, var(--cgfc-theme-text-primary, var(--text-primary, #161616))); font: inherit; line-height: 1.45; outline: none; }
         .cgpt-queue-edit-text::-webkit-scrollbar { display: none; }
@@ -3750,6 +3818,18 @@
         main.appendChild(itemStatus);
         const actions = document.createElement('div');
         actions.className = 'cgpt-queue-row-actions';
+        const sendNow = this.makeRowActionButton(
+          'M22 2 9 15M22 2l-7 20-4-9-9-4z',
+          '立即发送这条消息，跳过自动队列等待',
+          `立即发送队列消息 ${index + 1}`
+        );
+        sendNow.className = 'cgpt-queue-send-now';
+        const sendNowLabel = document.createElement('span');
+        sendNowLabel.textContent = '立即发送';
+        sendNow.appendChild(sendNowLabel);
+        sendNow.disabled = Boolean(snapshot.editingItemId) || snapshot.isProcessing || item.status === 'sending';
+        sendNow.addEventListener('click', () => queue?.sendNow?.(item.id));
+        actions.appendChild(sendNow);
         if (!isEditing && item.status !== 'sending') {
           const edit = this.makeRowActionButton(
             'M4.5 19.5 8 18.8 18.2 8.6a2.1 2.1 0 0 0-3-3L4.8 15.8zM13.8 7l3 3',
@@ -6863,7 +6943,7 @@
       const strongSections = Array.from(root.querySelectorAll('p, li'))
         .filter((element) => element instanceof HTMLElement && belongsToAnswer(element))
         .map((element) => {
-          const strong = element.querySelector(':scope > strong:first-child, :scope > b:first-child');
+          const strong = element.querySelector(':scope > strong:first-child, :scope > b:first-child, :scope > [data-d-component="text"][data-d-default-strong]:first-child, :scope > [data-d-component="text"][data-d-weight="bold"]:first-child');
           if (!(strong instanceof HTMLElement)) return null;
           const label = this.normalizeText(strong.textContent ?? '');
           if (label.length < 2 || label.length > 100) return null;
@@ -6948,7 +7028,7 @@
         const raw = this.normalizeText(element.textContent ?? '');
         const markdownBold = raw.match(/^\*\*([^*\n]{2,100})\*\*[:：]?/);
         if (markdownBold) return this.normalizeText(markdownBold[1]);
-        const strong = element.querySelector(':scope > strong:first-child, :scope > b:first-child');
+        const strong = element.querySelector(':scope > strong:first-child, :scope > b:first-child, :scope > [data-d-component="text"][data-d-default-strong]:first-child, :scope > [data-d-component="text"][data-d-weight="bold"]:first-child');
         if (!(strong instanceof HTMLElement)) return '';
         let textBefore = '';
         for (const node of element.childNodes) {
@@ -10460,6 +10540,15 @@
   const dom = globalThis.__cgptUnifiedRuntimeV1.dom;
   const chatContentSelector = `main :is(${dom.message}, ${dom.content})`;
   const proseTextSelector = `${chatContentSelector} :where(p, li, ul, ol, td, th, blockquote, details, summary, dt, dd):not(:where(.katex *, .MathJax *, mjx-container *, math *, pre *, code *, button *))`;
+  // Intelligent UI text owns its font metrics rather than inheriting Markdown's.
+  // Controls share the chosen typography; graphics, math and code keep their
+  // own rendering metrics. Preserve control colors for contrast and state.
+  const dilTextExclusions = ':not(:where(pre, pre *, code, code *, .katex, .katex *, .MathJax, .MathJax *, mjx-container, mjx-container *, math, math *, svg, svg *))';
+  const dilTextSelector = `${chatContentSelector} :is([data-d-component="text"], [data-d-component="title"])${dilTextExclusions}`;
+  const dilBodyTextSelector = `${chatContentSelector} [data-d-component="text"]${dilTextExclusions}`;
+  const dilControlTextSelector = `${chatContentSelector} :is([data-d-component="caption"], [data-d-component="badge"], [data-d-component="button"], [data-d-component="popover-trigger"], [data-d-component="pressable"], [data-d-component="slider"])${dilTextExclusions}`;
+  const dilProseColorSelector = `${dilTextSelector}:not(:where(button, button *, [role="button"], [role="button"] *, [data-d-component="badge"] *, [data-d-component="button"] *, [data-d-component="pressable"] *, [data-d-component="slider"] *))`;
+  const boldTextSelector = `${chatContentSelector} :is(strong, b, [data-d-component="text"][data-d-default-strong], [data-d-component="text"][data-d-weight="bold"], [data-d-component="text"][data-d-weight="semibold"])${dilTextExclusions}`;
   const STYLE_ID = 'cgfc-ophel-optimized-style';
   const TOGGLE_ID = 'cgfc-toggle';
   const PANEL_ID = 'cgfc-panel';
@@ -11101,7 +11190,7 @@
     const boldFontEnabled = boldLatinEnabled || boldChineseEnabled;
     if (boldFontEnabled) {
       const nativeBoldFont = (!boldLatinEnabled || !boldChineseEnabled)
-        ? nativeFamily(`${chatContentSelector} :is(strong, b)`, 'data-cgfc-bold-font')
+        ? nativeFamily(boldTextSelector, 'data-cgfc-bold-font')
         : 'system-ui';
       root.style.setProperty('--cgfc-bold-latin-font', boldLatinEnabled
         ? stripGenericFontFallbacks(settings.boldLatinFont, defaults.boldLatinFont)
@@ -13402,6 +13491,16 @@
   }
 
   const STATIC_CSS = `
+    /* The current footer paints a full-width solid surface and fade behind
+       its composer. Clear only those direct decorative layers; the actual
+       rounded input surface, content, controls and scroll container are intact. */
+    main [data-thread-scroll-footer="true"] > [aria-hidden="true"],
+    main .thread-scroll-container [aria-hidden="true"].sticky.bottom-0 > [aria-hidden="true"] {
+      background: transparent !important;
+      box-shadow: none !important;
+      pointer-events: none !important;
+    }
+
     html {
       --cgfc-theme-surface-primary: var(--main-surface-primary, var(--bg-primary, #ffffff));
       --cgfc-theme-surface-secondary: var(--main-surface-secondary, var(--bg-secondary, #f4f4f4));
@@ -13616,6 +13715,52 @@
       --font-content: var(--cgfc-latin-font), var(--cgfc-chinese-font), serif !important;
     }
 
+    html[data-cgfc-body-font] ${dilTextSelector},
+    html[data-cgfc-body-font] ${dilControlTextSelector} {
+      font-family: var(--cgfc-latin-font), var(--cgfc-chinese-font), serif !important;
+    }
+
+    html[data-cgfc-font-size] ${dilBodyTextSelector},
+    html[data-cgfc-font-size] ${dilControlTextSelector} {
+      font-size: var(--cgfc-font-size) !important;
+    }
+
+    html[data-cgfc-body-font] ${chatContentSelector} :is([data-d-component="list"], [data-d-component="list-item"]) {
+      font-family: var(--cgfc-latin-font), var(--cgfc-chinese-font), serif !important;
+    }
+    html[data-cgfc-font-size] ${chatContentSelector} :is([data-d-component="list"], [data-d-component="list-item"]) {
+      font-size: var(--cgfc-font-size) !important;
+    }
+
+    /* Native small buttons/badges have fixed pixel heights. Let their boxes
+       grow with text so a larger reading size cannot overlap the next row. */
+    html[data-cgfc-font-size] ${chatContentSelector} :is([data-d-component="button"], [data-d-component="badge"]) {
+      height: auto !important;
+      min-height: 1.7em !important;
+      line-height: 1.3 !important;
+    }
+    html[data-cgfc-font-size] ${chatContentSelector} :is([data-d-component="button"], [data-d-component="badge"], [data-d-component="popover-trigger"], [data-d-component="pressable"]) [data-d-component="text"]${dilTextExclusions} {
+      line-height: 1.3 !important;
+    }
+
+    /* Keep native title hierarchy, scaled relative to the chosen body size. */
+    html[data-cgfc-font-size] ${dilTextSelector}:where([data-d-component="title"]) {
+      font-size: calc(var(--cgfc-font-size) * 1.125) !important;
+    }
+    html[data-cgfc-font-size] ${dilTextSelector}:where([data-d-component="title"][data-d-size="xl"]) {
+      font-size: calc(var(--cgfc-font-size) * 1.25) !important;
+    }
+    html[data-cgfc-font-size] ${dilTextSelector}:where([data-d-component="title"][data-d-size="sm"], [data-d-component="title"][data-d-size="md"]) {
+      font-size: var(--cgfc-font-size) !important;
+    }
+
+    html[data-cgfc-normal-color] ${dilProseColorSelector} {
+      color: var(--cgfc-normal-color) !important;
+    }
+    html[data-cgfc-line-height] ${dilBodyTextSelector} {
+      line-height: var(--cgfc-line-height) !important;
+    }
+
     html[data-cgfc-font-smoothing-mode] body,
     html[data-cgfc-font-smoothing-mode] ${chatContentSelector},
     html[data-cgfc-font-smoothing-mode] textarea,
@@ -13660,6 +13805,10 @@
       font-size: var(--cgfc-thinking-overview-font-size) !important;
     }
 
+    html[data-cgfc-thinking-overview-font-size] main [data-markdown-text-style="assistant-message"][data-markdown-text-tone="tertiary"] [data-d-component="text"]${dilTextExclusions} {
+      font-size: var(--cgfc-thinking-overview-font-size) !important;
+    }
+
     html[data-cgfc-formula-font-size] ${chatContentSelector} .katex,
     html[data-cgfc-formula-font-size] ${chatContentSelector} mjx-container,
     html[data-cgfc-formula-font-size] ${chatContentSelector} math:not(.katex math):not(mjx-container math) {
@@ -13700,15 +13849,15 @@
       overflow-wrap: anywhere !important;
     }
 
-    html[data-cgfc-bold-font] ${chatContentSelector} :is(strong, b) {
+    html[data-cgfc-bold-font] ${boldTextSelector} {
       font-family: var(--cgfc-bold-latin-font), var(--cgfc-bold-chinese-font), serif !important;
     }
 
-    html[data-cgfc-bold-color] ${chatContentSelector} :is(strong, b) {
+    html[data-cgfc-bold-color] ${boldTextSelector} {
       color: var(--cgfc-bold-color) !important;
     }
 
-    html[data-cgfc-bold-weight] ${chatContentSelector} :is(strong, b) {
+    html[data-cgfc-bold-weight] ${boldTextSelector} {
       font-weight: var(--cgfc-bold-weight) !important;
     }
 
